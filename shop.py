@@ -25,7 +25,8 @@ def home_markup():
 def admin_markup():
     return Markup([[b('➕ Добавить товар',data='shop:admin:add',color='success')],
         [b('📦 Управление товарами',data='shop:admin:list')],
-        [b('🧩 Тест виджета',data='shop:admin:widget')]])
+        [b('🧩 Тест капчи',data='adminui:test'), b('📊 Статистика',data='adminui:stats')],
+        [b('📣 Рассылка',data='adminui:broadcast'), b('📢 Каналы',data='adminui:channels')]])
 
 async def admin_input(update, context, store, admin_id):
     msg = update.effective_message
@@ -183,9 +184,6 @@ async def callback(update, context, store, admin_id):
             if not products: await q.message.reply_text('Товаров пока нет.'); return
             rows = [[b(('✅ ' if p['active'] else '⏸ ') + p['name'][:55],data='shop:adminproduct:'+p['id'])] for p in products[:100]]
             await q.message.reply_text('Выбери товар, чтобы включить или скрыть:',reply_markup=Markup(rows))
-        elif sub == 'widget':
-            import captcha
-            await captcha.test_widget(update, context)
         return
     if action == 'adminproduct':
         if user_id != admin_id:
