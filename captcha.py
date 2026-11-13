@@ -27,6 +27,24 @@ def keyboard(token, answer, username):
     secrets.SystemRandom().shuffle(choices)
     return InlineKeyboardMarkup([[InlineKeyboardButton('🧩 Открыть виджет капчи', url=f'https://t.me/{username}?start=cap_{token}')], [InlineKeyboardButton(str(n), callback_data=f'cap:{token}:{n}') for n in choices]])
 
+def new_challenge(token):
+    """Return a question, numeric correct value and buttons; no external service."""
+    if secrets.randbelow(2) == 0:
+        a, b = secrets.randbelow(9)+1, secrets.randbelow(9)+1
+        answer = a+b
+        choices = {answer}
+        while len(choices) < 4:
+            choices.add(max(0, answer + secrets.choice((-5,-4,-3,-2,-1,1,2,3,4,5))))
+        values = list(choices)
+        secrets.SystemRandom().shuffle(values)
+        buttons = [InlineKeyboardButton(str(n), callback_data=f'cap:{token}:{n}') for n in values]
+        return f'Сколько будет {a} + {b}?', answer, a, buttons
+    icons = [('🍎','яблоко'), ('🚗','машину'), ('⭐','звезду'), ('🌵','кактус'), ('🐱','кота'), ('🍋','лимон')]
+    selected = secrets.SystemRandom().sample(icons, 4)
+    answer = secrets.randbelow(4)
+    buttons = [InlineKeyboardButton(icon, callback_data=f'cap:{token}:{i}') for i,(icon,_) in enumerate(selected)]
+    return f'Нажмите на {selected[answer][1]}:', answer, 0, buttons
+
 async def finish_message(bot, row, text):
     if row['message_id'] is None: return
     try:
@@ -78,9 +96,8 @@ async def member_update(update, context, store, admin_id):
             log.warning('Капча пропущена для участника с особыми правами chat=%s user=%s status=%s',chat,user.id,new.status)
             return
         if store.captcha(chat,user.id): return
-        a, b = secrets.randbelow(9)+1, secrets.randbelow(9)+1
-        answer = a+b
         token = secrets.token_hex(8)
+        question, answer, a, buttons = new_challenge(token)
         store.create_captcha(chat,user.id,token,answer,time.time()+TIME_LIMIT,a)
         try:
             await context.bot.restrict_chat_member(chat,user.id,ChatPermissions.no_permissions(),use_independent_chat_permissions=True)
@@ -93,7 +110,7 @@ async def member_update(update, context, store, admin_id):
             return
         try:
             name = (user.full_name or 'новый участник')[:100]
-            sent = await context.bot.send_message(chat_id=chat,text=f'👋 {name}, подтвердите, что вы человек.\nСколько будет {a} + {b}?\nОткройте виджет или выберите ответ ниже. Есть 10 минут и 3 попытки.',reply_markup=keyboard(token,answer,context.bot.username))
+            sent = await context.bot.send_message(chat_id=chat,text=f'👋 {name}, подтвердите, что вы человек.\n{question}\nЕсть 10 минут и 3 попытки.',reply_markup=InlineKeyboardMarkup([buttons]))
             store.captcha_update(chat,user.id,message_id=sent.message_id,state='pending')
         except TelegramError as exc:
             # Do not silently leave a user muted without a question. Persist until restore succeeds.
@@ -119,11 +136,13 @@ async def answer(update, context, store):
             await query.answer('Это устаревшая проверка.',show_alert=True)
             return
         if time.time() >= row['expires']:
+            store.record_captcha(row['token'],'failed')
             store.captcha_update(row['chat'],row['user'],state='failed')
             await query.answer('Время вышло.',show_alert=True)
             await settle(context.bot,store,store.captcha(row['chat'],row['user']))
             return
         if int(parts[2]) == row['correct']:
+            store.record_captcha(row['token'],'passed')
             store.captcha_update(row['chat'],row['user'],state='passed')
             await query.answer('Верно! Завершаем проверку.')
             await settle(context.bot,store,store.captcha(row['chat'],row['user']))
@@ -131,6 +150,7 @@ async def answer(update, context, store):
         attempts = row['attempts']+1
         store.captcha_update(row['chat'],row['user'],attempts=attempts,state='failed' if attempts >= MAX_ATTEMPTS else 'pending')
         if attempts >= MAX_ATTEMPTS:
+            store.record_captcha(row['token'],'failed')
             await query.answer('Три ошибки. Проверка не пройдена.',show_alert=True)
             await settle(context.bot,store,store.captcha(row['chat'],row['user']))
         else:
@@ -144,6 +164,7 @@ async def recover(bot, store):
                 store.captcha_update(row['chat'],row['user'],state='passed')
                 row = store.captcha(row['chat'],row['user'])
             if row['state'] == 'pending' and time.time() >= row['expires']:
+                store.record_captcha(row['token'],'failed')
                 store.captcha_update(row['chat'],row['user'],state='failed')
                 row = store.captcha(row['chat'],row['user'])
             if row['state'] != 'pending':
