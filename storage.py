@@ -156,6 +156,11 @@ class Store:
           provider_id TEXT NOT NULL, payment_url TEXT NOT NULL, state TEXT NOT NULL,
           created_at DOUBLE PRECISION NOT NULL, delivered_at DOUBLE PRECISION,
           UNIQUE(provider, provider_id));
+        CREATE TABLE IF NOT EXISTS donations (
+          id TEXT PRIMARY KEY, buyer BIGINT NOT NULL, price_kopecks BIGINT NOT NULL,
+          provider TEXT NOT NULL, provider_id TEXT NOT NULL, payment_url TEXT NOT NULL,
+          state TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+          UNIQUE(provider, provider_id));
         ''')
         self.db.commit()
 
@@ -199,4 +204,24 @@ class Store:
 
     def mark_delivered(self, order_id):
         self.db.execute("UPDATE orders SET state='delivered',delivered_at=? WHERE id=? AND state='paid'", (time.time(),order_id))
+        self.db.commit()
+
+    def donation_add(self, donation):
+        keys = ('id','buyer','price_kopecks','provider','provider_id','payment_url','state','created_at')
+        self.db.execute('INSERT INTO donations ('+','.join(keys)+') VALUES ('+','.join('?' for _ in keys)+')', tuple(donation[k] for k in keys))
+        self.db.commit()
+
+    def donation(self, donation_id):
+        row = self.db.execute('SELECT * FROM donations WHERE id=?', (donation_id,)).fetchone()
+        return dict(row) if row else None
+
+    def pending_donations(self):
+        return [dict(x) for x in self.db.execute("SELECT * FROM donations WHERE state IN ('pending','paid') ORDER BY created_at")]
+
+    def mark_donation_paid(self, donation_id):
+        self.db.execute("UPDATE donations SET state='paid' WHERE id=? AND state='pending'", (donation_id,))
+        self.db.commit()
+
+    def mark_donation_notified(self, donation_id):
+        self.db.execute("UPDATE donations SET state='notified' WHERE id=? AND state='paid'", (donation_id,))
         self.db.commit()

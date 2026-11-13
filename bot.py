@@ -198,7 +198,8 @@ async def shop_button(update, context):
     await shop.callback(update, context, store, ADMIN_ID)
 
 async def shop_message(update, context):
-    await shop.admin_input(update, context, store, ADMIN_ID)
+    if not await shop.donation_input(update, context):
+        await shop.admin_input(update, context, store, ADMIN_ID)
 
 async def scheduler(app):
     while True:

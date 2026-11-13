@@ -9,7 +9,7 @@ class PostgresIntegration(unittest.TestCase):
         with patch.dict(os.environ, {'DATABASE_URL':os.environ['TEST_DATABASE_URL']}):
             self.store=Store()
         self.store.init_shop()
-        for table in ('orders','products','captchas','words','word_defaults','topics'):
+        for table in ('donations','orders','products','captchas','words','word_defaults','topics'):
             self.store.db.execute('DELETE FROM '+table)
 
     def tearDown(self): self.store.db.close()
@@ -32,6 +32,13 @@ class PostgresIntegration(unittest.TestCase):
             'payment_url':'https://example.com','state':'pending','created_at':1})
         s.mark_paid('o1'); s.mark_delivered('o1')
         self.assertEqual(s.order('o1')['state'],'delivered')
+        s.donation_add({'id':'d1','buyer':123,'price_kopecks':100,'provider':'sbp','provider_id':'dtx',
+                        'payment_url':'https://example.com','state':'pending','created_at':1})
+        self.assertEqual(s.donation('d1')['price_kopecks'],100)
+        self.assertEqual(len(s.pending_donations()),1)
+        s.mark_donation_paid('d1'); s.mark_donation_notified('d1')
+        self.assertEqual(s.donation('d1')['state'],'notified')
+        self.assertEqual(s.pending_donations(),[])
 
     def test_migration_of_existing_sqlite(self):
         import subprocess

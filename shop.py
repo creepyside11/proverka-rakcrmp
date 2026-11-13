@@ -1,7 +1,6 @@
 """Private storefront and admin product management."""
 import asyncio
 import logging
-import os
 import secrets
 import time
 from decimal import Decimal, InvalidOperation
@@ -85,6 +84,53 @@ async def admin_input(update, context, store, admin_id):
         await msg.reply_text('✅ Товар добавлен в каталог.',reply_markup=admin_markup())
     return True
 
+async def donation_input(update, context):
+    msg = update.effective_message
+    if not msg or msg.chat.type != 'private' or 'donation_draft' not in context.user_data:
+        return False
+    text = (msg.text or '').strip()
+    if text.split('@')[0] == '/cancel':
+        context.user_data.pop('donation_draft', None)
+        await msg.reply_text('Поддержка отменена.')
+        return True
+    if text.startswith('/'):
+        return False
+    draft = context.user_data['donation_draft']
+    if draft.get('step') != 'amount':
+        return False
+    try:
+        # Limit input length before Decimal arithmetic to avoid expensive inputs.
+        if not text or len(text) > 16:
+            raise ValueError
+        value = Decimal(text.replace(',', '.'))
+        if not value.is_finite() or value < 1 or value > 1000000000000 or value * 100 != (value * 100).to_integral_value():
+            raise ValueError
+        amount = int(value * 100)
+    except (ValueError, InvalidOperation, OverflowError):
+        await msg.reply_text('Введи сумму от 1 ₽, не более двух знаков после запятой. Например: 150 или 150,50.')
+        return True
+    token = secrets.token_hex(6)
+    context.user_data['donation_draft'] = {'step':'method', 'amount':amount, 'token':token}
+    markup = Markup([[b('Crypto Bot', data='shop:donatepay:crypto:'+token)],
+                     [b('СБП', data='shop:donatepay:sbp:'+token), b('Карта', data='shop:donatepay:card:'+token)]])
+    await msg.reply_text(f'Сумма поддержки: {amount // 100}.{amount % 100:02d} ₽. Выбери способ оплаты:', reply_markup=markup)
+    return True
+
+async def check_donation(bot, store, donation_id, buyer=None):
+    async with lock:
+        donation = store.donation(donation_id)
+        if not donation or (buyer is not None and donation['buyer'] != buyer): return 'not_found'
+        if donation['state'] == 'notified': return 'notified'
+        if donation['state'] == 'pending':
+            if not await payments.paid(donation): return 'pending'
+            store.mark_donation_paid(donation_id)
+            donation = store.donation(donation_id)
+        if donation['state'] == 'paid':
+            await bot.send_message(chat_id=donation['buyer'], text='💜 Спасибо за поддержку проекта! Оплата подтверждена.')
+            store.mark_donation_notified(donation_id)
+            return 'notified'
+        return 'pending'
+
 async def deliver(bot, store, order):
     # The database is updated only after Telegram confirms send_document. A crash
     # immediately after sending can cause a repeat: Telegram has no idempotency key.
@@ -112,6 +158,10 @@ async def process_pending(bot, store):
         try: await check_order(bot,store,order['id'])
         except (payments.PaymentError, TelegramError):
             log.warning('Не удалось проверить или выдать заказ %s; повторим',order['id'])
+    for donation in store.pending_donations():
+        try: await check_donation(bot, store, donation['id'])
+        except (payments.PaymentError, TelegramError):
+            log.warning('Не удалось проверить поддержку %s; повторим', donation['id'])
 
 async def callback(update, context, store, admin_id):
     q = update.callback_query
@@ -125,6 +175,7 @@ async def callback(update, context, store, admin_id):
         sub = data[2] if len(data)>2 else ''
         await q.answer()
         if sub == 'add':
+            context.user_data.pop('donation_draft', None)
             context.user_data['product_draft']={'step':'category'}
             await q.message.reply_text('Новый товар. Отправь 1 — скрипт, 2 — бот. Для отмены: /cancel.')
         elif sub == 'list':
@@ -153,11 +204,43 @@ async def callback(update, context, store, admin_id):
         rows = [[b(f"{p['name'][:40]} · {p['price_kopecks']/100:.2f} ₽",data='shop:product:'+p['id'])] for p in products[:100]]
         await q.message.reply_text('Выбери товар:',reply_markup=Markup(rows)); return
     if action == 'donate':
-        url = os.getenv('DONATE_URL','').strip()
+        if context.user_data.get('product_draft'):
+            await q.answer('Сначала закончи добавление товара или отмени его командой /cancel.',show_alert=True)
+            return
+        context.user_data['donation_draft'] = {'step':'amount'}
         await q.answer()
-        if url.startswith('https://'):
-            await q.message.reply_text('Спасибо за поддержку проекта 💜',reply_markup=Markup([[b('Поддержать',url=url,color='success')]]))
-        else: await q.message.reply_text('Способ поддержки пока не настроен. Напиши в @RakCRMP_Support.')
+        await q.message.reply_text('💜 Спасибо за поддержку! Введи сумму в рублях от 1 ₽. Для отмены: /cancel.')
+        return
+    if action == 'donatepay':
+        if len(data) != 4 or data[2] not in ('crypto','sbp','card'):
+            await q.answer('Неизвестный способ оплаты.',show_alert=True); return
+        draft = context.user_data.get('donation_draft')
+        if not draft or draft.get('step') != 'method' or not secrets.compare_digest(draft.get('token',''), data[3]):
+            await q.answer('Этот выбор устарел. Начни поддержку заново.',show_alert=True); return
+        # Consume before awaiting the provider so repeated taps cannot create invoices concurrently.
+        context.user_data.pop('donation_draft', None)
+        await q.answer('Создаём счёт…')
+        donation_id = secrets.token_hex(12)
+        try:
+            provider_id, url = await payments.create(data[2], donation_id, user_id, draft['amount'], 'Поддержка проекта RakCRMP')
+        except payments.PaymentError:
+            context.user_data['donation_draft'] = draft
+            log.warning('Не удалось создать счёт поддержки %s', data[2])
+            await q.message.reply_text('Не удалось создать счёт. Выбери другой способ или попробуй позже: платёжный сервис может устанавливать собственный минимум.')
+            return
+        store.donation_add({'id':donation_id, 'buyer':user_id, 'price_kopecks':draft['amount'],
+                            'provider':data[2], 'provider_id':provider_id, 'payment_url':url,
+                            'state':'pending', 'created_at':time.time()})
+        await q.message.reply_text('Счёт создан. После подтверждения оплаты бот поблагодарит тебя 💜',
+            reply_markup=Markup([[b('Оплатить',url=url,color='success')], [b('Проверить оплату',data='shop:donatecheck:'+donation_id)]]))
+        return
+    if action == 'donatecheck':
+        await q.answer('Проверяем оплату…')
+        try:
+            state = await check_donation(context.bot, store, data[2], user_id) if len(data) == 3 else 'not_found'
+        except (payments.PaymentError, TelegramError):
+            await q.message.reply_text('Не удалось проверить оплату. Попробуй позже или обратись в поддержку.'); return
+        await q.message.reply_text({'pending':'Оплата ещё не подтверждена.', 'notified':'Поддержка подтверждена. Спасибо! 💜', 'not_found':'Платёж не найден.'}[state])
         return
     if action == 'product':
         product = store.product(data[2]) if len(data)>2 else None
