@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient,TestServer
 root=Path(__file__).resolve().parents[1]
 tree=ast.parse((root/'miniapp.py').read_text())
 function=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='asset')
-ns={'web':web,'ASSETS':root/'assets','ASSET_NAMES':frozenset(('characters.jpeg','background.jpeg','black-russia.jpeg','rakcrmp.webp','characters-cutout.webp'))}
+ns={'web':web,'ASSETS':root/'assets','ASSET_NAMES':frozenset(('characters.jpeg','background.jpeg','black-russia.jpeg','rakcrmp.webp','characters-cutout.webp','captcha-night.webp'))}
 exec(compile(ast.Module(body=[function],type_ignores=[]),'miniapp.py','exec'),ns)
 
 class AssetsTest(unittest.IsolatedAsyncioTestCase):
