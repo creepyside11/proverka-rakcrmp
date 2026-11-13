@@ -149,6 +149,45 @@ async def recover(bot, store):
             if row['state'] != 'pending':
                 await settle(bot,store,row)
 
+
+def render_widget(token, a, b, choices, attempts, demo=False):
+    """Build a self-contained Telegram Widget; the expected answer stays in the bot."""
+    if not token.isalnum() or len(token) > 24:
+        raise ValueError('Invalid widget token')
+    prefix = 'demo:' if demo else ''
+    buttons = ''.join(
+        f'<button type="button" onclick="send({n})">{n}</button>' for n in choices
+    )
+    title = 'Тест капчи' if demo else 'Проверка участника'
+    note = 'Тест не меняет права и не удаляет участников.' if demo else 'Выберите правильный ответ.'
+    initial_status = 'Выберите ответ' if demo else f'Осталось попыток: {attempts}'
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{{box-sizing:border-box}}body{{margin:0;padding:16px 16px max(16px,env(safe-area-inset-bottom));font-family:system-ui,sans-serif;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#222)}}
+.badge{{font-size:12px;font-weight:700;color:var(--tg-theme-hint-color,#777)}}h3{{font-size:20px;margin:8px 0}}p{{margin:8px 0;line-height:1.35}}.note{{color:var(--tg-theme-hint-color,#777)}}
+.question{{margin:14px 0;padding:14px;border-radius:14px;text-align:center;font-size:24px;font-weight:700;background:var(--tg-theme-secondary-bg-color,#f2f2f5)}}
+.choices{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}button{{min-height:44px;border:0;border-radius:12px;background:var(--tg-theme-button-color,#8774e1);color:var(--tg-theme-button-text-color,#fff);font:600 17px system-ui,sans-serif}}button:disabled{{opacity:.55}}#status{{min-height:20px;font-size:13px;overflow-wrap:anywhere}}
+</style></head><body><div class="badge">RAKCRMP · КАПЧА</div><h3>{title}</h3>
+<p class="note">{note}</p><div class="question">{a} + {b} = ?</div>
+<div class="choices">{buttons}</div><p id="status" role="status">{initial_status}</p>
+<script>
+let busy=false;
+function send(n){{
+ if(busy)return;
+ if(typeof TelegramWidget==='undefined'){{document.getElementById('status').textContent='Откройте виджет в Telegram.';return}}
+ busy=true;
+ const buttons=document.querySelectorAll('button');
+ buttons.forEach(b=>b.disabled=true);
+ document.getElementById('status').textContent='Проверяем…';
+ TelegramWidget.request('{prefix}{token}:'+n).then(
+  answer=>{{document.getElementById('status').textContent=answer.result||'Ответ получен.'}},
+  error=>{{document.getElementById('status').textContent='Ошибка связи ('+(error.code||'FAILED')+'). Попробуйте снова.'}}
+ ).finally(()=>{{busy=false;buttons.forEach(b=>b.disabled=false)}});
+}}
+if(typeof TelegramWidget!=='undefined')TelegramWidget.ready();
+</script></body></html>"""
+
 async def open_widget(update, context, store, token):
     """Deep link must be opened by the same account that joined the group."""
     async with lock:
@@ -168,11 +207,7 @@ async def open_widget(update, context, store, token):
             choices.add(max(0, answer + secrets.choice((-5,-4,-3,-2,-1,1,2,3,4,5))))
         choices = list(choices)
         secrets.SystemRandom().shuffle(choices)
-        buttons = ''.join(f'<button onclick="send({n})">{n}</button> ' for n in choices)
-        # The answer is only in server-side state, not in the widget's source.
-        widget = f'''<h3>🧩 Проверка участника</h3><p>Сколько будет {a} + {answer-a}?</p>
-{buttons}<p id="status">Осталось попыток: {MAX_ATTEMPTS-row['attempts']}</p>
-<script>function send(n){{TelegramWidget.request('{token}:'+n).then(a=>{{document.getElementById('status').textContent=a.result||'Ответ получен';}},()=>{{document.getElementById('status').textContent='Ошибка связи. Попробуйте снова.';}});}}</script>'''
+        widget = render_widget(token, a, answer-a, choices, MAX_ATTEMPTS-row['attempts'])
         try:
             sent = await context.bot._post('sendWidget', {'chat_id': user.id, 'html': widget, 'allow_queries': True, 'caption': 'Если виджет не отображается, вернитесь в группу и используйте кнопки под сообщением.'})
             store.captcha_update(row['chat'],row['user'],widget_message_id=sent['message_id'])
@@ -208,10 +243,7 @@ async def test_widget(update, context):
     token = secrets.token_hex(8)
     choices = [a+b, a+b+1, a+b+2, a+b-1]
     secrets.SystemRandom().shuffle(choices)
-    buttons = ''.join(f'<button onclick="send({n})">{n}</button> ' for n in choices)
-    html = f'''<h3>🧩 Тест виджета</h3><p>Сколько будет {a} + {b}?</p>
-{buttons}<p id="status">Выберите ответ</p>
-<script>function send(n){{TelegramWidget.request('demo:{token}:'+n).then(a=>{{document.getElementById('status').textContent=a.result||'Ответ получен';}},()=>{{document.getElementById('status').textContent='Ошибка связи';}});}}</script>'''
+    html = render_widget(token, a, b, choices, MAX_ATTEMPTS, demo=True)
     try:
         sent = await context.bot._post('sendWidget', {'chat_id': update.effective_user.id, 'html': html, 'allow_queries': True,
             'caption': 'Тест не ограничивает и не удаляет пользователя.'})
