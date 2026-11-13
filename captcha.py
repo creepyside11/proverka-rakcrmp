@@ -194,7 +194,23 @@ async def test_widget(update, context):
                                            'message_id': sent['message_id'], 'answer': a+b}
     except (TelegramError, KeyError) as exc:
         log.warning('Ошибка создания тестового виджета: %s: %s', type(exc).__name__, str(exc))
-        await update.effective_message.reply_text('Не удалось создать виджет. Подробности ошибки смотрите в журнале бота.')
+        if 'input_media_widget_not_allowed' not in str(exc).casefold():
+            await update.effective_message.reply_text('Не удалось создать виджет. Подробности ошибки смотрите в журнале бота.')
+            return
+        # Probe the smallest static widget: distinguishes a general restriction from
+        # a rejection specific to the interactive request. Never change the API host.
+        try:
+            await context.bot._post('sendWidget', {'chat_id': update.effective_user.id,
+                'html': '<p>Тест виджета Telegram</p>', 'caption': 'Диагностика виджета'})
+        except TelegramError as probe_exc:
+            log.warning('Ошибка минимального виджета: %s: %s', type(probe_exc).__name__, str(probe_exc))
+            await update.effective_message.reply_text(
+                'Telegram отклонил и интерактивный, и простой виджет. '
+                'В журнале указана ошибка минимального виджета; проверьте доступность виджетов для этого бота.')
+        else:
+            await update.effective_message.reply_text(
+                'Простой виджет отправлен, но интерактивный Telegram отклонил. '
+                'Это помогает проверить ограничение для запросов из виджета.')
 
 async def widget_query(update, context, store):
     raw = update.api_kwargs.get('widget_query')

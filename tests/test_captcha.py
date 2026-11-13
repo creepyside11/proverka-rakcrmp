@@ -100,6 +100,24 @@ class CaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.api.restrict_chat_member.assert_not_awaited()
         self.api.ban_chat_member.assert_not_awaited()
 
+    async def test_widget_diagnostic_when_telegram_rejects_interactive(self):
+        self.ctx.bot_data = {}
+        self.api._post.side_effect = [BadRequest('INPUT_MEDIA_WIDGET_NOT_ALLOWED'), {'message_id': 100}]
+        msg = NS(reply_text=AsyncMock())
+        await captcha.test_widget(NS(effective_user=self.user,effective_message=msg), self.ctx)
+        self.assertEqual(self.api._post.await_count, 2)
+        self.assertNotIn('allow_queries', self.api._post.await_args.args[1])
+        self.assertIn('Простой виджет отправлен', msg.reply_text.await_args.args[0])
+        self.assertNotIn('widget_demo', self.ctx.bot_data)
+
+    async def test_widget_diagnostic_when_both_are_rejected(self):
+        self.ctx.bot_data = {}
+        self.api._post.side_effect = BadRequest('INPUT_MEDIA_WIDGET_NOT_ALLOWED')
+        msg = NS(reply_text=AsyncMock())
+        await captcha.test_widget(NS(effective_user=self.user,effective_message=msg), self.ctx)
+        self.assertEqual(self.api._post.await_count, 2)
+        self.assertIn('отклонил и интерактивный, и простой', msg.reply_text.await_args.args[0])
+
     async def test_missing_admin_rights_no_stuck_record(self):
         self.api.restrict_chat_member.side_effect=BadRequest('missing rights')
         await self.join()
