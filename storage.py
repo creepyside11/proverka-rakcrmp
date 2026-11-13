@@ -79,6 +79,10 @@ class Store:
           chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, username TEXT);
         CREATE TABLE IF NOT EXISTS captcha_results (
           token TEXT PRIMARY KEY, result TEXT NOT NULL, created_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS web_challenges (
+          token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, question TEXT NOT NULL,
+          options TEXT NOT NULL, correct INTEGER NOT NULL, expires REAL NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0, demo INTEGER NOT NULL DEFAULT 0);
         ''')
         self.db.commit()
 
@@ -180,6 +184,20 @@ class Store:
     def record_captcha(self, token, result):
         if result not in ('passed','failed'): raise ValueError('invalid result')
         self.db.execute('INSERT OR IGNORE INTO captcha_results(token,result,created_at) VALUES(?,?,?)', (token,result,time.time()))
+        self.db.commit()
+
+    def create_web_challenge(self, token, user_id, question, options, correct, expires, demo=0):
+        self.db.execute('DELETE FROM web_challenges WHERE expires<?',(time.time()-3600,))
+        self.db.execute('INSERT INTO web_challenges(token,user_id,question,options,correct,expires,demo) VALUES(?,?,?,?,?,?,?)',
+                        (token,user_id,question,options,correct,expires,int(demo)))
+        self.db.commit()
+
+    def web_challenge(self, token):
+        row=self.db.execute('SELECT * FROM web_challenges WHERE token=?',(token,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_web_challenge(self, token):
+        self.db.execute('DELETE FROM web_challenges WHERE token=?',(token,))
         self.db.commit()
 
     def statistics(self):

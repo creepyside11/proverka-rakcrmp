@@ -1,12 +1,13 @@
 import asyncio
 import io
+import json
 import logging
 import os
 import secrets
 import time
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, MessageHandler, PreCheckoutQueryHandler, TypeHandler, filters
 
@@ -64,7 +65,11 @@ async def admin_command(update, context):
         await msg.reply_text('По вопросам оплаты напишите в поддержку: https://t.me/RakCRMP_Support')
         return
     if name == '/start' and msg.chat.type == 'private' and context.args and context.args[0].startswith('cap_'):
-        await msg.reply_text('Ответьте на вопрос кнопками под сообщением в группе.')
+        token = context.args[0][4:]
+        row = store.web_challenge(token)
+        if not row or row['user_id'] != update.effective_user.id or row['expires'] <= time.time():
+            await msg.reply_text('Проверка не найдена, истекла или предназначена другому участнику.'); return
+        await msg.reply_text('🧩 Откройте проверку:', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Открыть капчу', web_app=WebAppInfo(url='https://rakcrmp.bothost.tech/?captcha='+token))]]))
         return
     if name == '/start' and msg.chat.type == 'private':
         await msg.reply_text('👋 Добро пожаловать в RakCRMP! Выбери нужный раздел:', reply_markup=shop.home_markup())
@@ -214,9 +219,9 @@ async def broadcast_callback(update, context):
 async def test_captcha(update, context):
     token = secrets.token_hex(8)
     question, answer, _, buttons = captcha.new_challenge(token)
-    context.user_data['captcha_demo'] = {'token':token, 'answer':answer, 'expires':time.time()+600}
-    buttons = [InlineKeyboardButton(b.text, callback_data=b.callback_data.replace('cap:', 'capdemo:', 1)) for b in buttons]
-    await update.effective_message.reply_text('🧩 Тест капчи. Права участников не изменяются.\n'+question, reply_markup=InlineKeyboardMarkup([buttons]))
+    options = [{'label': b.text, 'value': int(b.callback_data.rsplit(':',1)[1])} for b in buttons]
+    store.create_web_challenge(token,update.effective_user.id,question,json.dumps(options,ensure_ascii=False),answer,time.time()+600,demo=1)
+    await update.effective_message.reply_text('🧩 Тест капчи. Права участников не изменяются.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Открыть тест капчи', web_app=WebAppInfo(url='https://rakcrmp.bothost.tech/?captcha='+token))]]))
 
 async def test_captcha_answer(update, context):
     q = update.callback_query

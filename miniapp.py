@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import time
@@ -14,6 +15,9 @@ from aiohttp import web
 from telegram import LabeledPrice
 from telegram.error import TelegramError
 from admin_features import joined
+import captcha
+import payments
+import shop
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
@@ -69,11 +73,11 @@ def get_order(store, order_id):
     return dict(row) if row else None
 
 
-async def authorize(request):
+async def authorize(request, require_subscription=True):
     app=request.app
     try: uid=validate_init_data(request.headers.get('X-Telegram-Init-Data',''),app['token'])
     except (ValueError,KeyError,TypeError,json.JSONDecodeError): raise web.HTTPUnauthorized(text='Откройте магазин через Telegram.')
-    if uid != app['admin_id']:
+    if require_subscription and uid != app['admin_id']:
         for channel in app['store'].channels():
             try: member=await app['bot'].get_chat_member(channel['chat_id'],uid)
             except TelegramError: raise web.HTTPServiceUnavailable(text='Не удалось проверить подписку. Попробуйте позже.')
@@ -90,7 +94,7 @@ async def catalog(request):
     store=request.app['store']
     products=store.products()
     out=[{'id':p['id'],'name':p['name'],'description':p['description'],'category':p['category'],
-          'stars':price(store,p['id'])} for p in products if p['category'] in ('scripts','bots')]
+          'stars':price(store,p['id']), 'price_kopecks':p['price_kopecks']} for p in products if p['category'] in ('scripts','bots')]
     return web.json_response({'products':out},headers={'Cache-Control':'no-store'})
 
 
@@ -112,6 +116,97 @@ async def create_invoice(request):
         log.warning('Не удалось создать Stars-счёт')
         raise web.HTTPBadGateway(text='Не удалось создать счёт. Попробуйте позже.')
     return web.json_response({'invoice_url':url},headers={'Cache-Control':'no-store'})
+
+
+async def create_external_payment(request):
+    uid=await authorize(request)
+    try: data=await request.json()
+    except (ValueError,TypeError): raise web.HTTPBadRequest(text='Некорректный запрос')
+    if not isinstance(data,dict): raise web.HTTPBadRequest(text='Некорректный запрос')
+    product_id, provider = data.get('product_id'), data.get('provider')
+    if not isinstance(product_id,str) or len(product_id)>64 or provider not in ('crypto','sbp','card'):
+        raise web.HTTPBadRequest(text='Некорректный товар или способ оплаты')
+    store=request.app['store']; product=store.product(product_id)
+    if not product or not product['active']: raise web.HTTPNotFound(text='Товар недоступен')
+    oid=secrets.token_hex(12)
+    try: provider_id,url=await payments.create(provider,oid,uid,product['price_kopecks'],product['name'])
+    except payments.PaymentError: raise web.HTTPBadGateway(text='Платёжный сервис не настроен или временно недоступен.')
+    order={**product,'id':oid,'buyer':uid,'product_id':product_id,'provider':provider,
+           'provider_id':provider_id,'payment_url':url,'state':'pending','created_at':time.time()}
+    store.order_add(order)
+    return web.json_response({'payment_url':url,'order_id':oid},headers={'Cache-Control':'no-store'})
+
+
+async def check_external_payment(request):
+    uid=await authorize(request)
+    try: data=await request.json()
+    except (ValueError,TypeError): raise web.HTTPBadRequest(text='Некорректный запрос')
+    oid=data.get('order_id') if isinstance(data,dict) else None
+    if not isinstance(oid,str) or not re.fullmatch(r'[0-9a-f]{24}',oid): raise web.HTTPBadRequest(text='Некорректный заказ')
+    try: state=await shop.check_order(request.app['bot'],request.app['store'],oid,uid)
+    except (payments.PaymentError,TelegramError): raise web.HTTPBadGateway(text='Не удалось проверить оплату. Попробуйте позже.')
+    return web.json_response({'state':state},headers={'Cache-Control':'no-store'})
+
+
+async def captcha_get(request):
+    uid=await authorize(request,require_subscription=False)
+    token=request.query.get('token','')
+    if not re.fullmatch(r'[0-9a-f]{16}',token): raise web.HTTPNotFound(text='Проверка не найдена.')
+    store=request.app['store']; challenge=store.web_challenge(token)
+    if not challenge or challenge['user_id']!=uid or challenge['expires']<=time.time():
+        raise web.HTTPNotFound(text='Проверка истекла или недоступна.')
+    if challenge['demo']:
+        if uid!=request.app['admin_id']: raise web.HTTPNotFound(text='Проверка недоступна.')
+        attempts=challenge['attempts']
+    else:
+        row=store.captcha_token(token)
+        if not row or row['user']!=uid or row['state']!='pending' or row['expires']<=time.time():
+            raise web.HTTPNotFound(text='Проверка уже завершена или истекла.')
+        attempts=row['attempts']
+    return web.json_response({'question':challenge['question'],'options':json.loads(challenge['options']),
+                              'attempts_left':max(0,captcha.MAX_ATTEMPTS-attempts),'demo':bool(challenge['demo'])},headers={'Cache-Control':'no-store'})
+
+
+async def captcha_answer(request):
+    uid=await authorize(request,require_subscription=False)
+    try: data=await request.json()
+    except (ValueError,TypeError): raise web.HTTPBadRequest(text='Некорректный запрос')
+    token=data.get('token') if isinstance(data,dict) else None
+    value=data.get('value') if isinstance(data,dict) else None
+    if not isinstance(token,str) or not re.fullmatch(r'[0-9a-f]{16}',token) or isinstance(value,bool) or not isinstance(value,int):
+        raise web.HTTPBadRequest(text='Некорректный ответ')
+    store=request.app['store']
+    async with captcha.lock:
+        challenge=store.web_challenge(token)
+        if not challenge or challenge['user_id']!=uid or challenge['expires']<=time.time():
+            raise web.HTTPNotFound(text='Проверка истекла или недоступна.')
+        if value not in [x['value'] for x in json.loads(challenge['options'])]: raise web.HTTPBadRequest(text='Некорректный вариант')
+        if challenge['demo']:
+            if uid!=request.app['admin_id']: raise web.HTTPNotFound(text='Проверка недоступна.')
+            if value==challenge['correct']:
+                store.delete_web_challenge(token)
+                return web.json_response({'result':'passed','message':'Тест пройден! Права участников не изменились.'})
+            attempts=challenge['attempts']+1
+            if attempts>=captcha.MAX_ATTEMPTS:
+                store.delete_web_challenge(token)
+                return web.json_response({'result':'failed','message':'Попытки закончились. Запустите новый тест.'})
+            store.db.execute('UPDATE web_challenges SET attempts=? WHERE token=?',(attempts,token));store.db.commit()
+            return web.json_response({'result':'retry','attempts_left':captcha.MAX_ATTEMPTS-attempts,'message':'Неверно, попробуйте ещё раз.'})
+        row=store.captcha_token(token)
+        if not row or row['user']!=uid or row['state']!='pending' or row['expires']<=time.time():
+            raise web.HTTPNotFound(text='Проверка уже завершена или истекла.')
+        if value==row['correct']:
+            store.record_captcha(token,'passed');store.captcha_update(row['chat'],uid,state='passed')
+            store.delete_web_challenge(token)
+            done=await captcha.settle(request.app['bot'],store,store.captcha(row['chat'],uid))
+            return web.json_response({'result':'passed','message':'Проверка пройдена! Вернитесь в группу.' if done else 'Ответ верный. Бот восстанавливает доступ в группу.'})
+        attempts=row['attempts']+1
+        store.captcha_update(row['chat'],uid,attempts=attempts,state='failed' if attempts>=captcha.MAX_ATTEMPTS else 'pending')
+        if attempts>=captcha.MAX_ATTEMPTS:
+            store.record_captcha(token,'failed');store.delete_web_challenge(token)
+            await captcha.settle(request.app['bot'],store,store.captcha(row['chat'],uid))
+            return web.json_response({'result':'failed','message':'Попытки закончились. Проверка не пройдена.'})
+        return web.json_response({'result':'retry','attempts_left':captcha.MAX_ATTEMPTS-attempts,'message':'Неверно, попробуйте ещё раз.'})
 
 
 async def precheckout(update, context, store):
@@ -167,8 +262,10 @@ async def start_server(app,store,token,admin_id):
     server=web.Application(client_max_size=4096)
     server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
+    server.router.add_post('/api/payment',create_external_payment); server.router.add_post('/api/payment/check',check_external_payment)
+    server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
-    try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','8000'))).start()
+    try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()
     except Exception:
         await runner.cleanup(); raise
     app.bot_data['miniapp_runner']=runner
