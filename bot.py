@@ -7,8 +7,9 @@ import time
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
+import captcha
 from moderation import check_text, is_lua
 from scanner import inspect, MAX_BYTES
 from storage import Store, TOGGLES
@@ -52,9 +53,14 @@ def describe(settings):
 
 async def admin_command(update, context):
     msg = update.effective_message
-    if not msg or not owner(update):
+    if not msg:
         return
     name = (msg.text or '').split()[0].split('@')[0].lower()
+    if name == '/start' and msg.chat.type == 'private' and context.args and context.args[0].startswith('cap_'):
+        await captcha.open_widget(update, context, store, context.args[0][4:])
+        return
+    if not owner(update):
+        return
     if name in ('/start', '/help'):
         await msg.reply_text(HELP)
         return
@@ -168,9 +174,19 @@ async def moderate(update, context):
     else:
         await msg.reply_text('✅ Проверка завершена: известных опасных признаков не обнаружено. Это не гарантия безопасности файла.')
 
+async def on_member(update, context):
+    await captcha.member_update(update, context, store, ADMIN_ID)
+
+async def on_captcha_answer(update, context):
+    await captcha.answer(update, context, store)
+
+async def on_widget_query(update, context):
+    await captcha.widget_query(update, context, store)
+
 async def scheduler(app):
     while True:
         try:
+            await captcha.recover(app.bot, store)
             for row in store.due():
                 # Reserve before sending: a crash may skip one announcement, but avoids a restart flood.
                 store.advance(row['chat'],row['topic'])
@@ -204,13 +220,16 @@ def main():
     if ADMIN_ID <= 0 or not token or token == 'сюда_токен_бота':
         raise SystemExit('Укажите BOT_TOKEN и положительный ADMIN_ID в .env')
     app = Application.builder().token(token).post_init(start_scheduler).post_shutdown(stop_scheduler).build()
+    app.add_handler(TypeHandler(Update, on_widget_query), group=-1)
+    app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER), group=0)
+    app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
     app.add_handler(CommandHandler(['start','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
     app.add_handler(CallbackQueryHandler(button, pattern=r'^toggle:'), group=0)
     # Process commands as content too; owner commands are exempt from text restrictions.
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, moderate), group=1)
     app.add_error_handler(on_error)
     log.info('Бот запущен')
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    app.run_polling(allowed_updates=list(Update.ALL_TYPES) + ['widget_query'], drop_pending_updates=False)
 
 if __name__ == '__main__':
     main()
