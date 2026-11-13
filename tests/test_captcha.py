@@ -2,7 +2,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from telegram import Update
 from telegram.error import BadRequest
 import captcha
@@ -114,9 +114,10 @@ class CaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.ctx.bot_data = {}
         self.api._post.side_effect = BadRequest('INPUT_MEDIA_WIDGET_NOT_ALLOWED')
         msg = NS(reply_text=AsyncMock())
-        await captcha.test_widget(NS(effective_user=self.user,effective_message=msg), self.ctx)
+        with patch('captcha.probe_widget_json', new_callable=AsyncMock, return_value=('rejected', 'INPUT_MEDIA_WIDGET_NOT_ALLOWED')):
+            await captcha.test_widget(NS(effective_user=self.user,effective_message=msg), self.ctx)
         self.assertEqual(self.api._post.await_count, 2)
-        self.assertIn('отклонил и интерактивный, и простой', msg.reply_text.await_args.args[0])
+        self.assertIn('Прямой JSON-запрос тоже отклонён', msg.reply_text.await_args.args[0])
 
     async def test_missing_admin_rights_no_stuck_record(self):
         self.api.restrict_chat_member.side_effect=BadRequest('missing rights')

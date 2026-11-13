@@ -3,6 +3,9 @@ import asyncio
 import logging
 import secrets
 import time
+from urllib.parse import urlsplit
+
+import httpx
 
 from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
@@ -177,6 +180,28 @@ async def open_widget(update, context, store, token):
             log.warning('Не удалось отправить виджет: %s: %s', type(exc).__name__, str(exc))
             await update.effective_message.reply_text('Не удалось открыть виджет. Вернитесь в группу и ответьте кнопками под сообщением.')
 
+async def probe_widget_json(bot, chat_id):
+    """Compare PTB's request with Bot API JSON; never log the token-bearing URL."""
+    base = bot.base_url.rstrip('/')
+    parsed = urlsplit(base)
+    if parsed.scheme != 'https' or parsed.hostname != 'api.telegram.org' or parsed.port not in (None, 443):
+        return 'skipped', 'Используется нестандартный адрес Bot API.'
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(base + '/sendWidget', json={
+                'chat_id': chat_id, 'html': '<p>Проверка виджета</p>'})
+        result = response.json()
+        if response.is_success and result.get('ok') is True:
+            return 'ok', ''
+        # Telegram error descriptions normally contain no credentials. Do not log
+        # the raw body: intermediary servers can return sensitive details.
+        error = str(result.get('description', 'неизвестная ошибка'))
+        if 'INPUT_MEDIA_WIDGET_NOT_ALLOWED' in error.upper():
+            return 'rejected', 'INPUT_MEDIA_WIDGET_NOT_ALLOWED'
+        return 'rejected', f'HTTP {response.status_code}'
+    except (httpx.HTTPError, ValueError):
+        return 'unavailable', 'Не удалось связаться с Bot API напрямую.'
+
 async def test_widget(update, context):
     """Admin-only caller creates a real widget without changing group membership."""
     a, b = secrets.randbelow(9) + 1, secrets.randbelow(9) + 1
@@ -204,9 +229,19 @@ async def test_widget(update, context):
                 'html': '<p>Тест виджета Telegram</p>', 'caption': 'Диагностика виджета'})
         except TelegramError as probe_exc:
             log.warning('Ошибка минимального виджета: %s: %s', type(probe_exc).__name__, str(probe_exc))
-            await update.effective_message.reply_text(
-                'Telegram отклонил и интерактивный, и простой виджет. '
-                'В журнале указана ошибка минимального виджета; проверьте доступность виджетов для этого бота.')
+            status, detail = await probe_widget_json(context.bot, update.effective_user.id)
+            log.info('Проверка виджета прямым JSON: status=%s detail=%s', status, detail)
+            if status == 'ok':
+                await update.effective_message.reply_text(
+                    'Прямой JSON-запрос отправил простой виджет, а запрос через библиотеку — нет. '
+                    'Сообщите администратору: JSON успешно, библиотека отклонила запрос.')
+            elif status == 'rejected':
+                await update.effective_message.reply_text(
+                    f'Прямой JSON-запрос тоже отклонён: {detail}. '
+                    'Проверьте, что чат личный, и передайте этот результат разработчику.')
+            else:
+                await update.effective_message.reply_text(
+                    f'Основной запрос отклонён; независимая проверка недоступна: {detail}')
         else:
             await update.effective_message.reply_text(
                 'Простой виджет отправлен, но интерактивный Telegram отклонил. '

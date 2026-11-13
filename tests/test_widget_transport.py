@@ -2,7 +2,9 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from telegram import Bot, Update
 from telegram.request import BaseRequest
@@ -54,3 +56,24 @@ class WidgetTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, 'answerWidgetQuery')
         self.assertEqual(params['widget_query_id'], 'query1')
         self.assertIn('Верно', params['data'])
+
+    async def test_direct_json_probe_uses_documented_minimal_request(self):
+        seen = []
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(400, json={'ok': False, 'description': 'INPUT_MEDIA_WIDGET_NOT_ALLOWED'})
+        original = httpx.AsyncClient
+        def client_factory(**kwargs):
+            return original(transport=httpx.MockTransport(handler), **kwargs)
+        bot = Bot('123456:fake-token')
+        with patch('captcha.httpx.AsyncClient', side_effect=client_factory):
+            status, detail = await captcha.probe_widget_json(bot, 42)
+        self.assertEqual((status, detail), ('rejected', 'INPUT_MEDIA_WIDGET_NOT_ALLOWED'))
+        self.assertEqual(seen[0].url.path.rsplit('/', 1)[-1], 'sendWidget')
+        self.assertEqual(json.loads(seen[0].content), {'chat_id': 42, 'html': '<p>Проверка виджета</p>'})
+
+    async def test_direct_json_probe_does_not_send_token_to_custom_host(self):
+        bot = SimpleNamespace(base_url='https://example.org/botSECRET')
+        status, detail = await captcha.probe_widget_json(bot, 42)
+        self.assertEqual(status, 'skipped')
+        self.assertNotIn('SECRET', detail)
