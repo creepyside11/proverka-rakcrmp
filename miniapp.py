@@ -21,6 +21,8 @@ import shop
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
+ASSETS = Path(__file__).with_name('assets')
+ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp'))
 delivery_lock = asyncio.Lock()
 
 
@@ -87,6 +89,13 @@ async def authorize(request, require_subscription=True):
 
 async def index(request):
     return web.FileResponse(INDEX, headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
+async def asset(request):
+    name = request.match_info['name']
+    if name not in ASSET_NAMES:
+        raise web.HTTPNotFound()
+    return web.FileResponse(ASSETS / name, headers={'Cache-Control':'public, max-age=86400', 'X-Content-Type-Options':'nosniff'})
 
 
 async def catalog(request):
@@ -262,6 +271,7 @@ async def start_server(app,store,token,admin_id):
     server=web.Application(client_max_size=4096)
     server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
+    server.router.add_get('/assets/{name}',asset)
     server.router.add_post('/api/payment',create_external_payment); server.router.add_post('/api/payment/check',check_external_payment)
     server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
