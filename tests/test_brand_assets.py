@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient,TestServer
 root=Path(__file__).resolve().parents[1]
 tree=ast.parse((root/'miniapp.py').read_text())
 function=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='asset')
-ns={'web':web,'ASSETS':root/'assets','ASSET_NAMES':frozenset(('characters.jpeg','background.jpeg','black-russia.jpeg','rakcrmp.webp'))}
+ns={'web':web,'ASSETS':root/'assets','ASSET_NAMES':frozenset(('characters.jpeg','background.jpeg','black-russia.jpeg','rakcrmp.webp','characters-cutout.webp'))}
 exec(compile(ast.Module(body=[function],type_ignores=[]),'miniapp.py','exec'),ns)
 
 class AssetsTest(unittest.IsolatedAsyncioTestCase):
@@ -24,5 +24,7 @@ class AssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/assets/bot.py')).status,404)
     def test_html_references_and_functional_elements(self):
         html=(root/'miniapp.html').read_text()
-        for name in ns['ASSET_NAMES']: self.assertIn('/assets/'+name,html)
+        assign=next(n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ASSET_NAMES' for t in n.targets))
+        self.assertEqual(ns['ASSET_NAMES'],frozenset(ast.literal_eval(assign.value.args[0])))
+        for name in ns['ASSET_NAMES'] - {'characters.jpeg'}: self.assertIn('/assets/'+name,html)
         for ident in ('catalog','buy','captcha-view','payment-check'):self.assertIn('id="'+ident+'"',html)

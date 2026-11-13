@@ -22,7 +22,7 @@ import shop
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
 ASSETS = Path(__file__).with_name('assets')
-ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp'))
+ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp', 'characters-cutout.webp'))
 delivery_lock = asyncio.Lock()
 
 
