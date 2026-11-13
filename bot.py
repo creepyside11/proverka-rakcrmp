@@ -8,11 +8,12 @@ import time
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
-from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, MessageHandler, TypeHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, MessageHandler, PreCheckoutQueryHandler, TypeHandler, filters
 
 import captcha
 import shop
 import admin_features
+import miniapp
 from moderation import check_text, is_lua
 from scanner import inspect, MAX_BYTES
 from storage import Store, TOGGLES
@@ -59,6 +60,9 @@ async def admin_command(update, context):
     if not msg:
         return
     name = (msg.text or '').split()[0].split('@')[0].lower()
+    if name == '/paysupport' and msg.chat.type == 'private':
+        await msg.reply_text('По вопросам оплаты напишите в поддержку: https://t.me/RakCRMP_Support')
+        return
     if name == '/start' and msg.chat.type == 'private' and context.args and context.args[0].startswith('cap_'):
         await msg.reply_text('Ответьте на вопрос кнопками под сообщением в группе.')
         return
@@ -68,7 +72,7 @@ async def admin_command(update, context):
     if not owner(update):
         return
     if name == '/admin' and msg.chat.type == 'private':
-        await msg.reply_text('⚙️ Панель администратора\n\n' + HELP + '\n\n/test_captcha — тест капчи\n/stats — статистика\n/broadcast текст — рассылка\n/channels — каналы\n/addchannel @username — добавить канал\n/delchannel @username — удалить канал\n/cancel — отмена добавления товара.', reply_markup=shop.admin_markup())
+        await msg.reply_text('⚙️ Панель администратора\n\n' + HELP + '\n\n/test_captcha — тест капчи\n/stats — статистика\n/broadcast текст — рассылка\n/channels — каналы\n/addchannel @username — добавить канал\n/delchannel @username — удалить канал\n/stars — цены магазина в Stars\n/cancel — отмена добавления товара.', reply_markup=shop.admin_markup())
         return
     if name == '/test_widget' and msg.chat.type == 'private':
         await test_captcha(update, context)
@@ -252,11 +256,33 @@ async def shop_message(update, context):
     if not await shop.donation_input(update, context):
         await shop.admin_input(update, context, store, ADMIN_ID)
 
+async def stars_admin(update, context):
+    if not owner(update) or update.effective_chat.type != 'private': return
+    if not context.args:
+        products=store.products(all_items=True)
+        if not products:
+            await update.effective_message.reply_text('Сначала добавьте товары через /admin.'); return
+        rows=[f"{p['id']} — {p['name'][:70]}: {miniapp.price(store,p['id']) or 'не задано'} ⭐" for p in products[:40]]
+        await update.effective_message.reply_text('Цены магазина:\n'+'\n'.join(rows)+'\n\nУстановить: /stars ID количество'); return
+    if len(context.args)!=2 or not context.args[1].isdigit():
+        await update.effective_message.reply_text('Пример: /stars ID 100'); return
+    try: miniapp.set_price(store,context.args[0],int(context.args[1]))
+    except (ValueError,OverflowError):
+        await update.effective_message.reply_text('Товар не найден или цена вне диапазона 1–1000000 ⭐.'); return
+    await update.effective_message.reply_text('✅ Цена в Stars сохранена.')
+
+async def stars_checkout(update, context):
+    await miniapp.precheckout(update,context,store)
+
+async def stars_paid(update, context):
+    await miniapp.successful_payment(update,context,store)
+
 async def scheduler(app):
     while True:
         try:
             await captcha.recover(app.bot, store)
             await shop.process_pending(app.bot, store)
+            await miniapp.process_paid(app.bot, store)
             for row in store.due():
                 # Reserve before sending: a crash may skip one announcement, but avoids a restart flood.
                 store.advance(row['chat'],row['topic'])
@@ -269,6 +295,7 @@ async def scheduler(app):
         await asyncio.sleep(10)
 
 async def start_scheduler(app):
+    await miniapp.start_server(app,store,os.environ['BOT_TOKEN'].strip(),ADMIN_ID)
     app.bot_data['scheduler'] = asyncio.create_task(scheduler(app))
 
 async def stop_scheduler(app):
@@ -277,6 +304,8 @@ async def stop_scheduler(app):
         task.cancel()
         try: await task
         except asyncio.CancelledError: pass
+    runner = app.bot_data.get('miniapp_runner')
+    if runner: await runner.cleanup()
     store.db.close()
 
 async def on_error(update, context):
@@ -291,11 +320,15 @@ def main():
         raise SystemExit('Укажите BOT_TOKEN и положительный ADMIN_ID в .env')
     store = Store()
     store.init_shop()
+    miniapp.init_tables(store)
     app = Application.builder().token(token).post_init(start_scheduler).post_shutdown(stop_scheduler).build()
     app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER), group=0)
     app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
-    app.add_handler(CommandHandler(['start','admin','test_widget','test_captcha','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
+    app.add_handler(CommandHandler(['start','admin','test_widget','test_captcha','help','panel','config','filter','word','words','autopost','paysupport'],admin_command), group=0)
+    app.add_handler(CommandHandler('stars',stars_admin), group=0)
+    app.add_handler(PreCheckoutQueryHandler(stars_checkout), group=0)
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_paid), group=0)
     app.add_handler(CommandHandler(['stats','channels','addchannel','delchannel','broadcast'],extra_admin), group=0)
     app.add_handler(CallbackQueryHandler(broadcast_callback, pattern=r'^broadcast:'), group=0)
     app.add_handler(CallbackQueryHandler(test_captcha_answer, pattern=r'^capdemo:'), group=0)
