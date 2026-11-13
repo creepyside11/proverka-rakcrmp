@@ -22,9 +22,14 @@ async def subscription_gate(update, context, store, admin_id):
     chat, user, msg = update.effective_chat, update.effective_user, update.effective_message
     if not chat or chat.type != 'private' or not user or user.id == admin_id:
         return
+    # A completed payment must never be dropped when subscription checking fails.
+    if msg and getattr(msg, 'successful_payment', None):
+        return
     query = update.callback_query
     text = (msg.text or '') if msg and not query else ''
     command = text.split(maxsplit=1)[0].split('@')[0].lower() if text else ''
+    if command == '/paysupport':
+        return
     if command == '/stop':
         store.opt_out(user.id)
         await msg.reply_text('Рассылка отключена. Чтобы снова её получать, отправьте /subscribe.')
