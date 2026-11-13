@@ -1,6 +1,7 @@
 """New-member challenge. No user-submitted code or third-party captcha service."""
 import asyncio
 import logging
+import json
 import secrets
 import time
 from urllib.parse import urlsplit
@@ -98,7 +99,9 @@ async def member_update(update, context, store, admin_id):
         if store.captcha(chat,user.id): return
         token = secrets.token_hex(8)
         question, answer, a, buttons = new_challenge(token)
+        options = [{'label': b.text, 'value': int(b.callback_data.rsplit(':',1)[1])} for b in buttons]
         store.create_captcha(chat,user.id,token,answer,time.time()+TIME_LIMIT,a)
+        store.create_web_challenge(token,user.id,question,json.dumps(options,ensure_ascii=False),answer,time.time()+TIME_LIMIT)
         try:
             await context.bot.restrict_chat_member(chat,user.id,ChatPermissions.no_permissions(),use_independent_chat_permissions=True)
         except TelegramError as exc:
@@ -110,7 +113,7 @@ async def member_update(update, context, store, admin_id):
             return
         try:
             name = (user.full_name or 'новый участник')[:100]
-            sent = await context.bot.send_message(chat_id=chat,text=f'👋 {name}, подтвердите, что вы человек.\n{question}\nЕсть 10 минут и 3 попытки.',reply_markup=InlineKeyboardMarkup([buttons]))
+            sent = await context.bot.send_message(chat_id=chat,text=f'👋 {name}, подтвердите, что вы человек.\nОткройте проверку: https://t.me/{context.bot.username}?start=cap_{token}\nЕсть 10 минут и 3 попытки.')
             store.captcha_update(chat,user.id,message_id=sent.message_id,state='pending')
         except TelegramError as exc:
             # Do not silently leave a user muted without a question. Persist until restore succeeds.
