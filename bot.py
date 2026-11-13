@@ -12,6 +12,7 @@ from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, C
 
 import captcha
 import shop
+import admin_features
 from moderation import check_text, is_lua
 from scanner import inspect, MAX_BYTES
 from storage import Store, TOGGLES
@@ -59,7 +60,7 @@ async def admin_command(update, context):
         return
     name = (msg.text or '').split()[0].split('@')[0].lower()
     if name == '/start' and msg.chat.type == 'private' and context.args and context.args[0].startswith('cap_'):
-        await captcha.open_widget(update, context, store, context.args[0][4:])
+        await msg.reply_text('Ответьте на вопрос кнопками под сообщением в группе.')
         return
     if name == '/start' and msg.chat.type == 'private':
         await msg.reply_text('👋 Добро пожаловать в RakCRMP! Выбери нужный раздел:', reply_markup=shop.home_markup())
@@ -67,10 +68,13 @@ async def admin_command(update, context):
     if not owner(update):
         return
     if name == '/admin' and msg.chat.type == 'private':
-        await msg.reply_text('⚙️ Панель администратора\n\n' + HELP + '\n\n/test_widget — тест виджета. /cancel — отмена добавления товара.', reply_markup=shop.admin_markup())
+        await msg.reply_text('⚙️ Панель администратора\n\n' + HELP + '\n\n/test_captcha — тест капчи\n/stats — статистика\n/broadcast текст — рассылка\n/channels — каналы\n/addchannel @username — добавить канал\n/delchannel @username — удалить канал\n/cancel — отмена добавления товара.', reply_markup=shop.admin_markup())
         return
     if name == '/test_widget' and msg.chat.type == 'private':
-        await captcha.test_widget(update, context)
+        await test_captcha(update, context)
+        return
+    if name == '/test_captcha' and msg.chat.type == 'private':
+        await test_captcha(update, context)
         return
     if name == '/help':
         await msg.reply_text(HELP)
@@ -194,6 +198,53 @@ async def on_captcha_answer(update, context):
 async def on_widget_query(update, context):
     await captcha.widget_query(update, context, store)
 
+async def gate(update, context):
+    await admin_features.subscription_gate(update, context, store, ADMIN_ID)
+
+async def extra_admin(update, context):
+    await admin_features.admin_command(update, context, store, ADMIN_ID)
+
+async def broadcast_callback(update, context):
+    await admin_features.broadcast_callback(update, context, store, ADMIN_ID)
+
+async def test_captcha(update, context):
+    token = secrets.token_hex(8)
+    question, answer, _, buttons = captcha.new_challenge(token)
+    context.user_data['captcha_demo'] = {'token':token, 'answer':answer, 'expires':time.time()+600}
+    buttons = [InlineKeyboardButton(b.text, callback_data=b.callback_data.replace('cap:', 'capdemo:', 1)) for b in buttons]
+    await update.effective_message.reply_text('🧩 Тест капчи. Права участников не изменяются.\n'+question, reply_markup=InlineKeyboardMarkup([buttons]))
+
+async def test_captcha_answer(update, context):
+    q = update.callback_query
+    if not owner(update) or not q.message or q.message.chat.type != 'private':
+        await q.answer('Только для администратора.', show_alert=True); return
+    parts = (q.data or '').split(':')
+    demo = context.user_data.get('captcha_demo')
+    if len(parts)!=3 or not demo or parts[1]!=demo['token'] or time.time()>demo['expires'] or not parts[2].isdigit():
+        await q.answer('Тест устарел.',show_alert=True); return
+    if int(parts[2]) == demo['answer']:
+        context.user_data.pop('captcha_demo',None)
+        await q.answer('Верно! Тест пройден.',show_alert=True)
+        await q.edit_message_reply_markup(reply_markup=None)
+    else:
+        await q.answer('Неверно. Попробуйте ещё раз.',show_alert=True)
+
+async def admin_ui(update, context):
+    q = update.callback_query
+    if not admin_features.admin(update, ADMIN_ID):
+        await q.answer('Только для администратора.',show_alert=True); return
+    await q.answer()
+    action = (q.data or '').split(':')[-1]
+    if action == 'test': await test_captcha(update,context)
+    elif action == 'stats':
+        s = store.statistics()
+        await q.message.reply_text('📊 Пользователей: {users}\nПолучателей рассылки: {broadcast}\nКапча пройдена: {passed}\nНе пройдена: {failed}\nОжидают: {pending}\nУчёт начинается с установки обновления.'.format(**s))
+    elif action == 'channels':
+        channels = store.channels()
+        text = '\n'.join(f"{c['title']} — {c['chat_id']}" for c in channels) or 'Список пуст.'
+        await q.message.reply_text('📢 Каналы:\n'+text+'\n\nДобавить: /addchannel @username\nУдалить: /delchannel @username\nДля частного канала: /addchannel -100ID https://t.me/+ссылка')
+    elif action == 'broadcast': await q.message.reply_text('Отправьте /broadcast и текст сообщения. Перед отправкой появится подтверждение.')
+
 async def shop_button(update, context):
     await shop.callback(update, context, store, ADMIN_ID)
 
@@ -241,10 +292,14 @@ def main():
     store = Store()
     store.init_shop()
     app = Application.builder().token(token).post_init(start_scheduler).post_shutdown(stop_scheduler).build()
-    app.add_handler(TypeHandler(Update, on_widget_query), group=-1)
+    app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER), group=0)
     app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
-    app.add_handler(CommandHandler(['start','admin','test_widget','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
+    app.add_handler(CommandHandler(['start','admin','test_widget','test_captcha','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
+    app.add_handler(CommandHandler(['stats','channels','addchannel','delchannel','broadcast'],extra_admin), group=0)
+    app.add_handler(CallbackQueryHandler(broadcast_callback, pattern=r'^broadcast:'), group=0)
+    app.add_handler(CallbackQueryHandler(test_captcha_answer, pattern=r'^capdemo:'), group=0)
+    app.add_handler(CallbackQueryHandler(admin_ui, pattern=r'^adminui:'), group=0)
     app.add_handler(CallbackQueryHandler(button, pattern=r'^toggle:'), group=0)
     app.add_handler(CallbackQueryHandler(shop_button, pattern=r'^shop:'), group=0)
     app.add_handler(CommandHandler('cancel', shop_message), group=0)
@@ -253,7 +308,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, moderate), group=1)
     app.add_error_handler(on_error)
     log.info('Бот запущен')
-    app.run_polling(allowed_updates=list(Update.ALL_TYPES) + ['widget_query'], drop_pending_updates=False)
+    app.run_polling(allowed_updates=list(Update.ALL_TYPES), drop_pending_updates=False)
 
 if __name__ == '__main__':
     main()

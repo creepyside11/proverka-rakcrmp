@@ -73,6 +73,12 @@ class Store:
           correct INTEGER NOT NULL, expires REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
           state TEXT NOT NULL DEFAULT 'pending', message_id INTEGER, question_a INTEGER, widget_message_id INTEGER,
           PRIMARY KEY(chat,user));
+        CREATE TABLE IF NOT EXISTS bot_users (
+          user_id INTEGER PRIMARY KEY, first_seen REAL NOT NULL, subscribed INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS required_channels (
+          chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, username TEXT);
+        CREATE TABLE IF NOT EXISTS captcha_results (
+          token TEXT PRIMARY KEY, result TEXT NOT NULL, created_at REAL NOT NULL);
         ''')
         self.db.commit()
 
@@ -141,6 +147,49 @@ class Store:
 
     def captcha_waiting(self):
         return [dict(row) for row in self.db.execute('SELECT * FROM captchas')]
+
+    def register_user(self, user_id):
+        self.db.execute('INSERT OR IGNORE INTO bot_users(user_id,first_seen,subscribed) VALUES(?,?,1)', (user_id,time.time()))
+        self.db.commit()
+
+    def opt_out(self, user_id):
+        self.db.execute('UPDATE bot_users SET subscribed=0 WHERE user_id=?', (user_id,))
+        self.db.commit()
+
+    def opt_in(self, user_id):
+        self.register_user(user_id)
+        self.db.execute('UPDATE bot_users SET subscribed=1 WHERE user_id=?', (user_id,))
+        self.db.commit()
+
+    def broadcast_users(self):
+        return [r['user_id'] for r in self.db.execute('SELECT user_id FROM bot_users WHERE subscribed=1 ORDER BY user_id')]
+
+    def add_channel(self, chat_id, title, url, username):
+        self.db.execute('DELETE FROM required_channels WHERE chat_id=?', (chat_id,))
+        self.db.execute('INSERT INTO required_channels(chat_id,title,url,username) VALUES(?,?,?,?)', (chat_id,title,url,username))
+        self.db.commit()
+
+    def channels(self):
+        return [dict(r) for r in self.db.execute('SELECT * FROM required_channels ORDER BY title')]
+
+    def delete_channel(self, chat_id):
+        result = self.db.execute('DELETE FROM required_channels WHERE chat_id=?', (chat_id,))
+        self.db.commit()
+        return result.rowcount
+
+    def record_captcha(self, token, result):
+        if result not in ('passed','failed'): raise ValueError('invalid result')
+        self.db.execute('INSERT OR IGNORE INTO captcha_results(token,result,created_at) VALUES(?,?,?)', (token,result,time.time()))
+        self.db.commit()
+
+    def statistics(self):
+        def count(sql):
+            return self.db.execute(sql).fetchone()['n']
+        return {'users':count('SELECT COUNT(*) AS n FROM bot_users'),
+                'broadcast':count('SELECT COUNT(*) AS n FROM bot_users WHERE subscribed=1'),
+                'passed':count("SELECT COUNT(*) AS n FROM captcha_results WHERE result='passed'"),
+                'failed':count("SELECT COUNT(*) AS n FROM captcha_results WHERE result='failed'"),
+                'pending':count("SELECT COUNT(*) AS n FROM captchas WHERE state='pending'")}
 
     def init_shop(self):
         self.db.executescript('''
