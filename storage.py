@@ -21,6 +21,11 @@ class Store:
           word TEXT NOT NULL, PRIMARY KEY(chat,topic,word));
         CREATE TABLE IF NOT EXISTS word_defaults (chat INTEGER NOT NULL, topic INTEGER NOT NULL,
           PRIMARY KEY(chat,topic));
+        CREATE TABLE IF NOT EXISTS captchas (
+          chat INTEGER NOT NULL, user INTEGER NOT NULL, token TEXT UNIQUE NOT NULL,
+          correct INTEGER NOT NULL, expires REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL DEFAULT 'pending', message_id INTEGER, question_a INTEGER, widget_message_id INTEGER,
+          PRIMARY KEY(chat,user));
         ''')
         self.db.commit()
 
@@ -61,3 +66,31 @@ class Store:
     def advance(self, chat, topic):
         self.db.execute('UPDATE topics SET next_at=?+interval_sec WHERE chat=? AND topic=?', (time.time(),chat,topic))
         self.db.commit()
+
+    def create_captcha(self, chat, user, token, correct, expires, question_a):
+        self.db.execute('''INSERT OR REPLACE INTO captchas
+          (chat,user,token,correct,expires,attempts,state,message_id,question_a)
+          VALUES(?,?,?,?,?,0,'preparing',NULL,?)''', (chat,user,token,correct,expires,question_a))
+        self.db.commit()
+
+    def captcha(self, chat, user):
+        row = self.db.execute('SELECT * FROM captchas WHERE chat=? AND user=?', (chat,user)).fetchone()
+        return dict(row) if row else None
+
+    def captcha_token(self, token):
+        row = self.db.execute('SELECT * FROM captchas WHERE token=?', (token,)).fetchone()
+        return dict(row) if row else None
+
+    def captcha_update(self, chat, user, **values):
+        allowed = {'state', 'attempts', 'message_id', 'widget_message_id'}
+        if not values or not set(values) <= allowed: raise ValueError('invalid fields')
+        fields = ','.join(k + '=?' for k in values)
+        self.db.execute(f'UPDATE captchas SET {fields} WHERE chat=? AND user=?', (*values.values(),chat,user))
+        self.db.commit()
+
+    def captcha_remove(self, chat, user):
+        self.db.execute('DELETE FROM captchas WHERE chat=? AND user=?', (chat,user))
+        self.db.commit()
+
+    def captcha_waiting(self):
+        return [dict(row) for row in self.db.execute('SELECT * FROM captchas')]
