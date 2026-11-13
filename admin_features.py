@@ -30,6 +30,8 @@ async def subscription_gate(update, context, store, admin_id):
     command = text.split(maxsplit=1)[0].split('@')[0].lower() if text else ''
     if command == '/paysupport':
         return
+    if command == '/start' and len(text.split()) > 1 and text.split()[1].startswith('cap_'):
+        return
     if command == '/stop':
         store.opt_out(user.id)
         await msg.reply_text('Рассылка отключена. Чтобы снова её получать, отправьте /subscribe.')
