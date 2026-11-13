@@ -11,6 +11,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
 import captcha
+import shop
 from moderation import check_text, is_lua
 from scanner import inspect, MAX_BYTES
 from storage import Store, TOGGLES
@@ -19,7 +20,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logging.getLogger('httpx').setLevel(logging.WARNING)
 log = logging.getLogger('moderator')
-store = Store()
+store = None
 ADMIN_ID = 0
 LABELS = {'insults': 'Оскорбления', 'ads': 'Ссылки/реклама', 'luaonly': 'Только Lua/Luac', 'unknown_delete': 'Удалять непроверенное', 'scan': 'Проверка Lua/Luac'}
 HELP = '''Команды владельца (отправляйте в нужной теме):
@@ -61,12 +62,12 @@ async def admin_command(update, context):
         await captcha.open_widget(update, context, store, context.args[0][4:])
         return
     if name == '/start' and msg.chat.type == 'private':
-        await msg.reply_text('Добро пожаловать в RakCRMP! Для управления ботом используйте /admin.')
+        await msg.reply_text('👋 Добро пожаловать в RakCRMP! Выбери нужный раздел:', reply_markup=shop.home_markup())
         return
     if not owner(update):
         return
     if name == '/admin' and msg.chat.type == 'private':
-        await msg.reply_text(HELP + '\n\n/test_widget — безопасно проверить капчу.')
+        await msg.reply_text('⚙️ Панель администратора\n\n' + HELP + '\n\n/test_widget — тест виджета. /cancel — отмена добавления товара.', reply_markup=shop.admin_markup())
         return
     if name == '/test_widget' and msg.chat.type == 'private':
         await captcha.test_widget(update, context)
@@ -193,10 +194,17 @@ async def on_captcha_answer(update, context):
 async def on_widget_query(update, context):
     await captcha.widget_query(update, context, store)
 
+async def shop_button(update, context):
+    await shop.callback(update, context, store, ADMIN_ID)
+
+async def shop_message(update, context):
+    await shop.admin_input(update, context, store, ADMIN_ID)
+
 async def scheduler(app):
     while True:
         try:
             await captcha.recover(app.bot, store)
+            await shop.process_pending(app.bot, store)
             for row in store.due():
                 # Reserve before sending: a crash may skip one announcement, but avoids a restart flood.
                 store.advance(row['chat'],row['topic'])
@@ -223,18 +231,23 @@ async def on_error(update, context):
     log.error('Ошибка обработки: %s', type(context.error).__name__, exc_info=context.error)
 
 def main():
-    global ADMIN_ID
+    global ADMIN_ID, store
     token = os.getenv('BOT_TOKEN', '').strip()
     try: ADMIN_ID = int(os.getenv('ADMIN_ID', ''))
     except ValueError: raise SystemExit('Укажите числовой ADMIN_ID в .env')
     if ADMIN_ID <= 0 or not token or token == 'сюда_токен_бота':
         raise SystemExit('Укажите BOT_TOKEN и положительный ADMIN_ID в .env')
+    store = Store()
+    store.init_shop()
     app = Application.builder().token(token).post_init(start_scheduler).post_shutdown(stop_scheduler).build()
     app.add_handler(TypeHandler(Update, on_widget_query), group=-1)
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER), group=0)
     app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
     app.add_handler(CommandHandler(['start','admin','test_widget','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
     app.add_handler(CallbackQueryHandler(button, pattern=r'^toggle:'), group=0)
+    app.add_handler(CallbackQueryHandler(shop_button, pattern=r'^shop:'), group=0)
+    app.add_handler(CommandHandler('cancel', shop_message), group=0)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, shop_message), group=0)
     # Process commands as content too; owner commands are exempt from text restrictions.
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, moderate), group=1)
     app.add_error_handler(on_error)

@@ -1,13 +1,60 @@
 import sqlite3
+import os
+import re
 import time
 
 DEFAULT_WORDS = ('дурак', 'идиот', 'дебил', 'мудак', 'тварь')
 TOGGLES = ('insults', 'ads', 'luaonly', 'unknown_delete', 'scan')
 
+class PostgresConnection:
+    """Small compatibility layer for the existing moderation queries."""
+    def __init__(self, url):
+        import psycopg
+        from psycopg.rows import dict_row
+        self.conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+
+    @staticmethod
+    def convert(sql):
+        sql = sql.replace('?', '%s')
+        sql = re.sub(r'\buser\b', '"user"', sql, flags=re.I)
+        if 'INSERT OR IGNORE INTO' in sql:
+            sql = sql.replace('INSERT OR IGNORE INTO', 'INSERT INTO') + ' ON CONFLICT DO NOTHING'
+        elif 'INSERT OR REPLACE INTO captchas' in sql:
+            sql = sql.replace('INSERT OR REPLACE INTO', 'INSERT INTO')
+            sql += """ ON CONFLICT (chat, "user") DO UPDATE SET token=EXCLUDED.token, correct=EXCLUDED.correct, expires=EXCLUDED.expires, attempts=0, state='preparing', message_id=NULL, question_a=EXCLUDED.question_a, widget_message_id=NULL"""
+        return sql
+
+    def execute(self, sql, params=()):
+        return self.conn.execute(self.convert(sql), params)
+
+    def executemany(self, sql, rows):
+        with self.conn.cursor() as cur:
+            cur.executemany(self.convert(sql), rows)
+
+    def executescript(self, sql):
+        for statement in sql.split(';'):
+            statement = statement.strip()
+            if statement and not statement.startswith('PRAGMA'):
+                statement = re.sub(r'\bINTEGER\b', 'BIGINT', statement)
+                statement = re.sub(r'\bREAL\b', 'DOUBLE PRECISION', statement)
+                self.execute(statement)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        self.conn.close()
+
 class Store:
-    def __init__(self, path='moderator.sqlite3'):
-        self.db = sqlite3.connect(path)
-        self.db.row_factory = sqlite3.Row
+    def __init__(self, path=None):
+        if path is None:
+            url = os.getenv('DATABASE_URL', '').strip()
+            if not url.startswith(('postgres://', 'postgresql://')):
+                raise RuntimeError('Укажите PostgreSQL DATABASE_URL')
+            self.db = PostgresConnection(url)
+        else:
+            self.db = sqlite3.connect(path)
+            self.db.row_factory = sqlite3.Row
         self.db.executescript('''
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS topics (
@@ -47,7 +94,7 @@ class Store:
 
     def words(self, chat, topic):
         self.ensure(chat, topic)
-        return [r[0] for r in self.db.execute('SELECT word FROM words WHERE chat=? AND topic=? ORDER BY word', (chat,topic))]
+        return [r['word'] for r in self.db.execute('SELECT word FROM words WHERE chat=? AND topic=? ORDER BY word', (chat,topic))]
 
     def word(self, chat, topic, word, add):
         self.ensure(chat,topic)
@@ -94,3 +141,62 @@ class Store:
 
     def captcha_waiting(self):
         return [dict(row) for row in self.db.execute('SELECT * FROM captchas')]
+
+    def init_shop(self):
+        self.db.executescript('''
+        CREATE TABLE IF NOT EXISTS products (
+          id TEXT PRIMARY KEY, category TEXT NOT NULL, name TEXT NOT NULL,
+          description TEXT NOT NULL, price_kopecks BIGINT NOT NULL,
+          file_id TEXT NOT NULL, filename TEXT NOT NULL, instruction TEXT NOT NULL,
+          active BIGINT NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS orders (
+          id TEXT PRIMARY KEY, buyer BIGINT NOT NULL, product_id TEXT NOT NULL,
+          name TEXT NOT NULL, price_kopecks BIGINT NOT NULL, file_id TEXT NOT NULL,
+          filename TEXT NOT NULL, instruction TEXT NOT NULL, provider TEXT NOT NULL,
+          provider_id TEXT NOT NULL, payment_url TEXT NOT NULL, state TEXT NOT NULL,
+          created_at DOUBLE PRECISION NOT NULL, delivered_at DOUBLE PRECISION,
+          UNIQUE(provider, provider_id));
+        ''')
+        self.db.commit()
+
+    def product_add(self, product):
+        self.db.execute('''INSERT INTO products(id,category,name,description,price_kopecks,file_id,filename,instruction)
+          VALUES(?,?,?,?,?,?,?,?)''', tuple(product[k] for k in ('id','category','name','description','price_kopecks','file_id','filename','instruction')))
+        self.db.commit()
+
+    def product(self, product_id):
+        row = self.db.execute('SELECT * FROM products WHERE id=?', (product_id,)).fetchone()
+        return dict(row) if row else None
+
+    def products(self, category=None, all_items=False):
+        sql = 'SELECT * FROM products WHERE 1=1'
+        params = []
+        if category:
+            sql += ' AND category=?'; params.append(category)
+        if not all_items: sql += ' AND active=1'
+        return [dict(x) for x in self.db.execute(sql + ' ORDER BY name', params)]
+
+    def product_set_active(self, product_id, active):
+        result = self.db.execute('UPDATE products SET active=? WHERE id=?', (int(active), product_id))
+        self.db.commit()
+        return result.rowcount > 0
+
+    def order_add(self, order):
+        keys = ('id','buyer','product_id','name','price_kopecks','file_id','filename','instruction','provider','provider_id','payment_url','state','created_at')
+        self.db.execute('INSERT INTO orders ('+','.join(keys)+') VALUES ('+','.join('?' for _ in keys)+')', tuple(order[k] for k in keys))
+        self.db.commit()
+
+    def order(self, order_id):
+        row = self.db.execute('SELECT * FROM orders WHERE id=?', (order_id,)).fetchone()
+        return dict(row) if row else None
+
+    def pending_orders(self):
+        return [dict(x) for x in self.db.execute("SELECT * FROM orders WHERE state IN ('pending','paid') ORDER BY created_at")]
+
+    def mark_paid(self, order_id):
+        self.db.execute("UPDATE orders SET state='paid' WHERE id=? AND state='pending'", (order_id,))
+        self.db.commit()
+
+    def mark_delivered(self, order_id):
+        self.db.execute("UPDATE orders SET state='delivered',delivered_at=? WHERE id=? AND state='paid'", (time.time(),order_id))
+        self.db.commit()
