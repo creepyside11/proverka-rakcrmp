@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+import secrets
 import time
 
 from dotenv import load_dotenv
@@ -59,9 +60,18 @@ async def admin_command(update, context):
     if name == '/start' and msg.chat.type == 'private' and context.args and context.args[0].startswith('cap_'):
         await captcha.open_widget(update, context, store, context.args[0][4:])
         return
+    if name == '/start' and msg.chat.type == 'private':
+        await msg.reply_text('Добро пожаловать в RakCRMP! Для управления ботом используйте /admin.')
+        return
     if not owner(update):
         return
-    if name in ('/start', '/help'):
+    if name == '/admin' and msg.chat.type == 'private':
+        await msg.reply_text(HELP + '\n\n/test_widget — безопасно проверить капчу.')
+        return
+    if name == '/test_widget' and msg.chat.type == 'private':
+        await captcha.test_widget(update, context)
+        return
+    if name == '/help':
         await msg.reply_text(HELP)
         return
     if not group(msg):
@@ -223,7 +233,7 @@ def main():
     app.add_handler(TypeHandler(Update, on_widget_query), group=-1)
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER), group=0)
     app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
-    app.add_handler(CommandHandler(['start','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
+    app.add_handler(CommandHandler(['start','admin','test_widget','help','panel','config','filter','word','words','autopost'],admin_command), group=0)
     app.add_handler(CallbackQueryHandler(button, pattern=r'^toggle:'), group=0)
     # Process commands as content too; owner commands are exempt from text restrictions.
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, moderate), group=1)

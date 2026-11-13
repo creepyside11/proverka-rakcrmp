@@ -174,13 +174,48 @@ async def open_widget(update, context, store, token):
             sent = await context.bot._post('sendWidget', {'chat_id': user.id, 'html': widget, 'allow_queries': True, 'caption': 'Если виджет не отображается, вернитесь в группу и используйте кнопки под сообщением.'})
             store.captcha_update(row['chat'],row['user'],widget_message_id=sent['message_id'])
         except (TelegramError, KeyError) as exc:
-            log.warning('Не удалось отправить виджет: %s',type(exc).__name__)
+            log.warning('Не удалось отправить виджет: %s: %s', type(exc).__name__, str(exc))
             await update.effective_message.reply_text('Не удалось открыть виджет. Вернитесь в группу и ответьте кнопками под сообщением.')
+
+async def test_widget(update, context):
+    """Admin-only caller creates a real widget without changing group membership."""
+    a, b = secrets.randbelow(9) + 1, secrets.randbelow(9) + 1
+    token = secrets.token_hex(8)
+    choices = [a+b, a+b+1, a+b+2, a+b-1]
+    secrets.SystemRandom().shuffle(choices)
+    buttons = ''.join(f'<button onclick="send({n})">{n}</button> ' for n in choices)
+    html = f'''<h3>🧩 Тест виджета</h3><p>Сколько будет {a} + {b}?</p>
+{buttons}<p id="status">Выберите ответ</p>
+<script>function send(n){{TelegramWidget.request('demo:{token}:'+n).then(a=>{{document.getElementById('status').textContent=a.result||'Ответ получен';}},()=>{{document.getElementById('status').textContent='Ошибка связи';}});}}</script>'''
+    try:
+        sent = await context.bot._post('sendWidget', {'chat_id': update.effective_user.id, 'html': html, 'allow_queries': True,
+            'caption': 'Тест не ограничивает и не удаляет пользователя.'})
+        context.bot_data['widget_demo'] = {'token': token, 'user': update.effective_user.id,
+                                           'message_id': sent['message_id'], 'answer': a+b}
+    except (TelegramError, KeyError) as exc:
+        log.warning('Ошибка создания тестового виджета: %s: %s', type(exc).__name__, str(exc))
+        await update.effective_message.reply_text('Не удалось создать виджет. Подробности ошибки смотрите в журнале бота.')
 
 async def widget_query(update, context, store):
     raw = update.api_kwargs.get('widget_query')
     if not raw: return
     query_id = raw.get('id')
+    data = raw.get('data') or ''
+    if data.startswith('demo:'):
+        demo = context.bot_data.get('widget_demo', {})
+        parts = data.split(':')
+        valid = (len(parts) == 3 and parts[1] == demo.get('token')
+                 and raw.get('from', {}).get('id') == demo.get('user')
+                 and raw.get('chat', {}).get('id') == demo.get('user')
+                 and raw.get('chat', {}).get('type') == 'private'
+                 and raw.get('message_id') == demo.get('message_id'))
+        response = ('Верно! Тест пройден.' if valid and parts[2] == str(demo.get('answer'))
+                    else 'Неверно. Попробуйте ещё раз.' if valid else 'Тест недоступен.')
+        try:
+            await context.bot._post('answerWidgetQuery', {'widget_query_id': query_id, 'data': response})
+        except TelegramError as exc:
+            log.warning('Не удалось ответить тестовому виджету: %s', type(exc).__name__)
+        return
     response = 'Проверка недоступна.'
     settle_row = None
     async with lock:

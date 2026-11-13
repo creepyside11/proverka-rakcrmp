@@ -86,6 +86,20 @@ class CaptchaTests(unittest.IsolatedAsyncioTestCase):
         await captcha.widget_query(update,self.ctx,self.store)
         self.assertEqual(self.store.captcha(-100,5)['attempts'],0)
 
+    async def test_admin_real_widget_demo(self):
+        self.ctx.bot_data = {}
+        msg = NS(reply_text=AsyncMock())
+        await captcha.test_widget(NS(effective_user=self.user,effective_message=msg),self.ctx)
+        demo = self.ctx.bot_data['widget_demo']
+        self.assertEqual(self.api._post.await_args.args[0], 'sendWidget')
+        raw = {'id':'q', 'from':{'id':5}, 'chat':{'id':5,'type':'private'},
+               'message_id':99, 'data':f"demo:{demo['token']}:{demo['answer']}"}
+        await captcha.widget_query(NS(api_kwargs={'widget_query':raw}),self.ctx,self.store)
+        self.assertEqual(self.api._post.await_args.args[0], 'answerWidgetQuery')
+        self.assertIn('Верно', self.api._post.await_args.args[1]['data'])
+        self.api.restrict_chat_member.assert_not_awaited()
+        self.api.ban_chat_member.assert_not_awaited()
+
     async def test_missing_admin_rights_no_stuck_record(self):
         self.api.restrict_chat_member.side_effect=BadRequest('missing rights')
         await self.join()
