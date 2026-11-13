@@ -32,3 +32,23 @@ class PostgresIntegration(unittest.TestCase):
             'payment_url':'https://example.com','state':'pending','created_at':1})
         s.mark_paid('o1'); s.mark_delivered('o1')
         self.assertEqual(s.order('o1')['state'],'delivered')
+
+    def test_migration_of_existing_sqlite(self):
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'old.sqlite3'
+            old = Store(str(path))
+            old.toggle(-1009876543210, 7, 'ads', True)
+            old.word(-1009876543210, 7, 'тестовоеслово', True)
+            old.create_captcha(-1009876543210,123,'token',4,2000000000,1)
+            old.db.close()
+            env = {**os.environ, 'DATABASE_URL':os.environ['TEST_DATABASE_URL']}
+            subprocess.run([sys.executable,'migrate_sqlite.py',str(path)],env=env,check=True,capture_output=True)
+            self.assertEqual(self.store.get(-1009876543210,7)['ads'],1)
+            self.assertIn('тестовоеслово',self.store.words(-1009876543210,7))
+            self.assertEqual(self.store.captcha(-1009876543210,123)['token'],'token')
+            second = subprocess.run([sys.executable,'migrate_sqlite.py',str(path)],env=env,capture_output=True)
+            self.assertNotEqual(second.returncode, 0)
