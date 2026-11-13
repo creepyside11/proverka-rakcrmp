@@ -4,7 +4,7 @@ import logging
 import secrets
 import time
 from decimal import Decimal, InvalidOperation
-from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
+from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup, WebAppInfo
 from telegram.error import TelegramError
 import payments
 
@@ -19,6 +19,7 @@ def b(text, *, data=None, url=None, color='primary'):
 
 def home_markup():
     return Markup([[b('📥 Скачать программу',url=DOWNLOAD,color='success')],
+        [Button('🛍 Магазин RakCRMP',web_app=WebAppInfo(url='https://rakcrmp.bothost.tech/'))],
         [b('📜 Купить скрипт',data='shop:catalog:scripts'), b('🤖 Купить бота',data='shop:catalog:bots')],
         [b('💜 Поддержать проект',data='shop:donate')], [b('🛟 Поддержка',url=SUPPORT)]])
 
