@@ -29,6 +29,7 @@ import vps_lua_remote
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
 INSTALL_GUIDE = Path(__file__).with_name('INSTALL_ALL_SYSTEMS_RU.md')
+SUPPORT_RENDER = Path(__file__).with_name('support_render.js')
 ASSETS = Path(__file__).with_name('assets')
 ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp', 'characters-cutout.webp', 'captcha-night.webp'))
 delivery_lock = asyncio.Lock()
@@ -136,6 +137,11 @@ async def support_test(request): return await support_ai.test_api(request,author
 async def support_tickets(request): return await support_ai.tickets(request,authorize)
 async def support_thread(request): return await support_ai.thread(request,authorize)
 async def support_send(request): return await support_ai.send(request,authorize)
+async def support_avatar(request): return await support_ai.avatar(request,authorize)
+
+
+async def support_render(request):
+    return web.FileResponse(SUPPORT_RENDER,headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Type':'application/javascript; charset=utf-8'})
 
 
 async def asset(request):
@@ -390,6 +396,7 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
     server.router.add_get('/assets/{name}',asset)
     server.router.add_get('/install-guide',install_guide)
+    server.router.add_get('/support-render.js',support_render)
     server.router.add_post('/api/payment',create_external_payment); server.router.add_post('/api/payment/check',check_external_payment)
     server.router.add_post('/api/stars/check',check_stars)
     server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
@@ -409,6 +416,7 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/support/tickets',support_tickets)
     server.router.add_post('/api/support/tickets',support_tickets)
     server.router.add_get('/api/support/tickets/{number}',support_thread)
+    server.router.add_get('/api/support/tickets/{number}/avatar',support_avatar)
     server.router.add_post('/api/support/tickets/{number}/messages',support_send)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()

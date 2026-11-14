@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import ipaddress
+import io
 import logging
 import secrets
 import time
@@ -10,6 +11,7 @@ from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from aiohttp import web
+from telegram.error import TelegramError
 
 log=logging.getLogger('support_ai')
 BASE_PROMPT = '''Ты — ИИ-помощник поддержки RakCRMP. Отвечай по-русски, дружелюбно, короткими понятными шагами, если пользователь не попросил другой язык. Помогай устанавливать и запускать игровой проект Black с Lua, разбирать сообщения об ошибках и пользоваться магазином и мини-приложением. Если не хватает информации, спроси ОС, версию сборки и точный текст ошибки без секретов. Не утверждай, что ты видишь VPS, состояние заказа, логи, платежи, версии или файлы пользователя: у тебя нет инструментов и доступа к ним. Не обещай, что команды точно сработают без проверки.
@@ -220,6 +222,32 @@ async def thread(request,authorize):
     except ValueError as exc: raise web.HTTPBadRequest(text=str(exc))
     has_more=len(messages)>200
     return web.json_response({'ticket':ticket,'messages':messages[-200:],'has_more':has_more},headers={'Cache-Control':'no-store'})
+
+
+class AvatarBuffer(io.BytesIO):
+    def write(self, value):
+        if self.tell()+len(value)>512*1024: raise ValueError('avatar too large')
+        return super().write(value)
+
+
+async def avatar(request,authorize):
+    uid=await authorize(request,require_subscription=False);app=request.app
+    ticket=get_ticket(app['store'],request.match_info['number'])
+    if not ticket or (ticket['owner_id']!=uid and uid!=app['admin_id']): raise web.HTTPNotFound()
+    try:
+        photos=await app['bot'].get_user_profile_photos(ticket['owner_id'],limit=1)
+        if not photos.photos or not photos.photos[0]: return web.Response(status=204,headers={'Cache-Control':'no-store'})
+        photo=photos.photos[0][0]
+        if photo.file_size is not None and photo.file_size>512*1024: return web.Response(status=204,headers={'Cache-Control':'no-store'})
+        remote=await app['bot'].get_file(photo.file_id)
+        buf=AvatarBuffer();await remote.download_to_memory(out=buf);data=buf.getvalue()
+        if data.startswith(b'\xff\xd8\xff'): mime='image/jpeg'
+        elif data.startswith(b'\x89PNG\r\n\x1a\n'): mime='image/png'
+        elif data.startswith(b'RIFF') and data[8:12]==b'WEBP': mime='image/webp'
+        else:return web.Response(status=204,headers={'Cache-Control':'no-store'})
+        return web.Response(body=data,content_type=mime,headers={'Cache-Control':'private, max-age=300','X-Content-Type-Options':'nosniff'})
+    except (TelegramError,OSError,ValueError,RuntimeError):
+        return web.Response(status=204,headers={'Cache-Control':'no-store'})
 
 
 async def send(request,authorize):
