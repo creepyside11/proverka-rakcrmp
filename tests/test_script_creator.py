@@ -1,5 +1,7 @@
 import os
 import tempfile
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -21,16 +23,16 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close();self.store.db.close()
     async def test_chat_saves_separately_and_no_cross_user_history(self):
-        with patch.object(creator,'model',AsyncMock(return_value='```lua\nbr.log("hi")\n```')), patch.object(creator,'check_syntax',AsyncMock(return_value={'status':'ok','message':'syntactic only'})):
-            resp=await self.client.post('/messages',headers={'uid':'42'},json={'text':'сделай скрипт'})
+        with patch.object(creator,'paid_model',AsyncMock(return_value='```lua\nbr.log("hi")\n```')), patch.object(creator,'check_syntax',AsyncMock(return_value={'status':'ok','message':'syntactic only'})):
+            resp=await self.client.post('/messages',headers={'uid':'42'},json={'text':'сделай скрипт','model':'glm'})
             data=await resp.json();self.assertTrue(data['ok']);self.assertEqual(data['code'],'br.log("hi")\n');self.assertEqual(data['check']['status'],'ok')
-        other=await self.client.get('/messages',headers={'uid':'43'});self.assertEqual(other.status,403)
+        other=await self.client.get('/messages',headers={'uid':'43'});self.assertEqual((await other.json())['messages'],[])
         own=await self.client.get('/messages',headers={'uid':'42'});self.assertEqual(len((await own.json())['messages']),2)
     async def test_corrects_failed_syntax_once(self):
         model=AsyncMock(side_effect=['```lua\nbroken\n```','```lua\nfixed\n```'])
         checks=AsyncMock(side_effect=[{'status':'error','message':'syntax error'},{'status':'ok','message':'syntax only'}])
-        with patch.object(creator,'model',model),patch.object(creator,'check_syntax',checks):
-            r=await self.client.post('/messages',headers={'uid':'42'},json={'text':'create'})
+        with patch.object(creator,'paid_model',model),patch.object(creator,'check_syntax',checks):
+            r=await self.client.post('/messages',headers={'uid':'42'},json={'text':'create','model':'glm'})
             data=await r.json();self.assertEqual(data['code'],'fixed\n');self.assertEqual(model.await_count,2)
     async def test_missing_compiler_is_explicit(self):
         with patch('script_creator.shutil.which',return_value=None):
@@ -40,3 +42,8 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
             bin=Path(d)/'luac5.4';bin.write_text('#!/bin/sh\n[ "$1" = "-p" ] && exit 0\nexit 1\n');bin.chmod(0o755)
             with patch('script_creator.shutil.which',return_value=str(bin)):
                 self.assertEqual((await creator.check_syntax('os.execute("bad")'))['status'],'ok')
+
+class CreatorBrowserFlowTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'),'Node.js is unavailable')
+    def test_model_selection_and_send(self):
+        subprocess.run(['node','tests/test_creator_flow.js'],check=True,capture_output=True,text=True,timeout=10)

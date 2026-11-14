@@ -3,6 +3,7 @@ import asyncio
 import logging
 import secrets
 import time
+import os
 from decimal import Decimal, InvalidOperation
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup, WebAppInfo
 from telegram.error import TelegramError
@@ -27,6 +28,7 @@ def home_markup():
 def admin_markup():
     return Markup([[b('➕ Добавить товар',data='shop:admin:add',color='success')],
         [b('📦 Управление товарами',data='shop:admin:list')],
+        [b('🧠 Настройки моделей ИИ',data='aimodel:menu')],
         [b('🧩 Тест капчи',data='adminui:test'), b('📊 Статистика',data='adminui:stats')],
         [b('📣 Рассылка',data='adminui:broadcast'), b('📢 Каналы',data='adminui:channels')]])
 
@@ -137,6 +139,11 @@ async def check_donation(bot, store, donation_id, buyer=None):
 async def deliver(bot, store, order):
     # The database is updated only after Telegram confirms send_document. A crash
     # immediately after sending can cause a repeat: Telegram has no idempotency key.
+    if order['file_id'].startswith('ai:'):
+        import ai_gateway
+        token=ai_gateway.issue(store,os.environ['BOT_TOKEN'].strip(),'external',order)
+        await bot.send_message(chat_id=order['buyer'],text='✅ Оплата подтверждена. Ваш ключ ИИ:\nBase URL: '+ai_gateway.PUBLIC+'\nAPI Token: '+token+'\nModel: '+order['file_id'][3:]+'\nБаланс и ключ также доступны в Mini App.')
+        store.mark_delivered(order['id']);return
     await bot.send_document(chat_id=order['buyer'], document=order['file_id'], filename=order['filename'],
         caption=('✅ Оплата подтверждена. '+order['name'])[:1024])
     await bot.send_message(chat_id=order['buyer'], text='Инструкция:\n'+order['instruction'])
@@ -178,6 +185,8 @@ async def callback(update, context, store, admin_id):
         sub = data[2] if len(data)>2 else ''
         await q.answer()
         if sub == 'add':
+            if context.user_data.get('ai_model_draft'):
+                await q.message.reply_text('Сначала завершите настройку модели или отправьте /cancel.');return
             context.user_data.pop('donation_draft', None)
             context.user_data['product_draft']={'step':'category'}
             await q.message.reply_text('Новый товар. Отправь 1 — скрипт, 2 — бот. Для отмены: /cancel.')
@@ -204,8 +213,8 @@ async def callback(update, context, store, admin_id):
         rows = [[b(f"{p['name'][:40]} · {p['price_kopecks']/100:.2f} ₽",data='shop:product:'+p['id'])] for p in products[:100]]
         await q.message.reply_text('Выбери товар:',reply_markup=Markup(rows)); return
     if action == 'donate':
-        if context.user_data.get('product_draft'):
-            await q.answer('Сначала закончи добавление товара или отмени его командой /cancel.',show_alert=True)
+        if context.user_data.get('product_draft') or context.user_data.get('ai_model_draft'):
+            await q.answer('Сначала закончи текущее действие или отмени его командой /cancel.',show_alert=True)
             return
         context.user_data['donation_draft'] = {'step':'amount'}
         await q.answer()

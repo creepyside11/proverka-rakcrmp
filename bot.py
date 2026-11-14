@@ -1,3 +1,4 @@
+import re
 import asyncio
 import io
 import json
@@ -13,6 +14,8 @@ from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, C
 
 import captcha
 import shop
+import ai_models
+import ai_gateway
 import admin_features
 import miniapp
 from moderation import check_text, is_lua
@@ -258,8 +261,36 @@ async def shop_button(update, context):
     await shop.callback(update, context, store, ADMIN_ID)
 
 async def shop_message(update, context):
+    if await ai_models.input(update, context, store, ADMIN_ID, os.getenv('BOT_TOKEN','').strip()): return
     if not await shop.donation_input(update, context):
         await shop.admin_input(update, context, store, ADMIN_ID)
+
+async def model_admin(update, context):
+    await ai_models.menu(update,context,store,ADMIN_ID)
+
+async def model_button(update, context):
+    if update.callback_query.data=='aimodel:menu':
+        if update.effective_user.id!=ADMIN_ID or not update.callback_query.message or update.callback_query.message.chat.type!='private':
+            await update.callback_query.answer('Доступ запрещён.',show_alert=True);return
+        await update.callback_query.answer()
+        await ai_models.menu(update,context,store,ADMIN_ID)
+    else:
+        await ai_models.choose(update,context,store,ADMIN_ID)
+
+async def ai_held(update,context):
+    if not owner(update) or update.effective_chat.type!='private':return
+    rows=store.db.execute("SELECT u.id,u.order_ref,u.created_at,k.buyer FROM ai_usage u JOIN ai_keys k ON k.order_ref=u.order_ref WHERE u.state='pending' ORDER BY u.created_at LIMIT 30")
+    items=list(rows)
+    text='\n'.join('ID '+r['id']+' · пользователь '+str(r['buyer']) for r in items) if items else 'Ожидающих сверки запросов нет.'
+    await update.effective_message.reply_text(text+'\n\nПосле сверки с провайдером: /airesolve ID количество_токенов')
+
+async def ai_resolve(update,context):
+    if not owner(update) or update.effective_chat.type!='private':return
+    if len(context.args)!=2 or not re.fullmatch(r'[a-f0-9]{32}',context.args[0]) or not context.args[1].isdigit():
+        await update.effective_message.reply_text('Пример: /airesolve ID 1200. Сначала сверьте расход у провайдера.');return
+    try:done=ai_gateway.settle(store,context.args[0],int(context.args[1]))
+    except (ValueError,RuntimeError,OverflowError):await update.effective_message.reply_text('Не удалось завершить сверку. Проверьте ID и количество токенов.');return
+    await update.effective_message.reply_text('✅ Сверка выполнена, ключ разблокирован.' if done else 'Запрос не найден или уже сверян.')
 
 async def stars_admin(update, context):
     if not owner(update) or update.effective_chat.type != 'private': return
@@ -332,6 +363,10 @@ def main():
     app.add_handler(CallbackQueryHandler(on_captcha_answer, pattern=r'^cap:'), group=0)
     app.add_handler(CommandHandler(['start','admin','test_widget','test_captcha','help','panel','config','filter','word','words','autopost','paysupport'],admin_command), group=0)
     app.add_handler(CommandHandler('stars',stars_admin), group=0)
+    app.add_handler(CommandHandler('aimodels',model_admin), group=0)
+    app.add_handler(CommandHandler('aiheld',ai_held), group=0)
+    app.add_handler(CommandHandler('airesolve',ai_resolve), group=0)
+    app.add_handler(CallbackQueryHandler(model_button, pattern=r'^aimodel:'), group=0)
     app.add_handler(PreCheckoutQueryHandler(stars_checkout), group=0)
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_paid), group=0)
     app.add_handler(CommandHandler(['stats','channels','addchannel','delchannel','broadcast'],extra_admin), group=0)
