@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,6 +49,12 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/status',params={'job':job});body=await r.json();self.assertEqual(body['state'],'done')
         self.assertNotIn('MySecretPassword',str(body));self.assertNotIn(TOKEN,str(body))
         self.assertEqual(len(self.scripts),1);self.assertIn(v.PINNED_COMMIT,self.scripts[0]);self.assertIn('TG_BOT_TOKEN=',self.scripts[0]);self.assertNotIn('MySecretPassword',self.scripts[0])
+        script=self.scripts[0]
+        self.assertEqual(subprocess.run(['bash','-n'],input=script,text=True,capture_output=True).returncode,0)
+        for part in ('python3-venv', 'pip install', '-r requirements.txt', 'import telebot, requests',
+                     'sha256sum -c --status', 'SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box',
+                     'ExecStart=/opt/rakcrmp-black/.venv/bin/python'):
+            self.assertIn(part,script)
         r=await self.client.get('/status',params={'job':job},headers={'uid':'43'});self.assertEqual(r.status,404)
         r=await self.client.post('/start',json=data);self.assertEqual(r.status,400)
     async def test_unconfirmed_does_not_connect(self):
