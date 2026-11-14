@@ -14,17 +14,17 @@ class Element {
 const html=fs.readFileSync('miniapp.html','utf8');let ids={};for(const m of html.matchAll(/\bid="([^"]+)"/g))ids[m[1]]=new Element('div',m[1]);
 const document={body:new Element('body'),getElementById(id){return ids[id]},querySelectorAll(){return []},createElement(tag){return new Element(tag)},createDocumentFragment(){return new Element('#fragment')},createTextNode(t){let x=new Element('#text');x.textContent=t;return x}};
 const formatter=require('../support_render.js');const tg={ready(){},expand(){},initData:'signed'},window={Telegram:{WebApp:tg},RakSupportFormatter:formatter,scrollTo(){},matchMedia(){return {matches:false}}};
-let sent=null;
+let sent=null, polls=0;
 const response=(obj,status=200)=>({ok:status>=200&&status<300,status,json:async()=>obj,text:async()=>JSON.stringify(obj)});
 async function fetch(url,opts={}){
  if(url==='/api/catalog')return response({products:[]});
  if(url==='/api/creator/models')return response({models:[{model:'glm',name:'GLM',balance:1000000},{model:'gpt_sol',name:'GPT',balance:500}]});
  if(url==='/api/creator/messages'&&opts.method==='POST'){sent=JSON.parse(opts.body);return response({ok:true,started:true,run_id:'run-one'})}
  if(url==='/api/creator/progress')return response({state:'idle',events:[]});
- if(url==='/api/creator/progress?run=run-one')return response({state:'done',events:[{kind:'plan',message:'1. Создать файл'}],result:{ok:true,answer:'Готово',check:null}})
+ if(url==='/api/creator/progress?run=run-one'){polls++;if(polls===1)return response({state:'running',events:[{id:'e1',kind:'file',message:'Читаю файл'}]});return response({state:'done',events:[{id:'e1',kind:'file',message:'Читаю файл'},{id:'e2',kind:'plan',message:'1. Создать файл'}],result:{ok:true,answer:'Готово',check:null}})}
  if(url==='/api/creator/messages')return response({messages:[]});
  return response({});
 }
-const context={document,window,fetch,location:{search:'',href:''},URL,URLSearchParams,Intl,console,setTimeout,clearTimeout,setInterval,clearInterval,Map,Array,JSON,Promise};
+const context={document,window,fetch,location:{search:'',href:''},URL,URLSearchParams,Intl,console,setTimeout:(fn)=>{fn();return 0},clearTimeout,setInterval,clearInterval,Map,Array,JSON,Promise};
 const source=html.slice(html.lastIndexOf('<script>')+8,html.lastIndexOf('</script>'));vm.runInNewContext(source,context);
-(async()=>{await ids.creator.onclick();assert.equal(ids['creator-model'].children.length,2);ids['creator-model'].value='gpt_sol';ids['creator-input'].value='Сделай бота';await ids['creator-form'].onsubmit({preventDefault(){}});assert.deepEqual(sent,{text:'Сделай бота',model:'gpt_sol',background:true});assert(ids['creator-messages'].textContent.includes('Готово'));assert(ids['creator-events'].textContent.includes('Создать файл'));assert.equal(ids['creator-model'].value,'gpt_sol');ids['creator-back'].onclick();console.log('creator UI model selection OK')})().catch(e=>{console.error(e);process.exitCode=1});
+(async()=>{await ids.creator.onclick();assert.equal(ids['creator-model'].children.length,2);ids['creator-model'].value='gpt_sol';ids['creator-input'].value='Сделай бота';await ids['creator-form'].onsubmit({preventDefault(){}});assert.deepEqual(sent,{text:'Сделай бота',model:'gpt_sol',background:true});assert(ids['creator-messages'].textContent.includes('Готово'));assert(ids['creator-messages'].textContent.includes('Создать файл'));assert.equal((ids['creator-messages'].textContent.match(/Читаю файл/g)||[]).length,1);assert(!ids['creator-events']);assert.equal(ids['creator-model'].value,'gpt_sol');ids['creator-back'].onclick();console.log('creator UI model selection OK')})().catch(e=>{console.error(e);process.exitCode=1});

@@ -27,16 +27,21 @@ MODEL_RETRY_DELAY=10
 
 class EmptyModelResponse(Exception):
     """Provider returned a billed response without usable content."""
+    def __init__(self,reason=''):
+        super().__init__('empty response')
+        self.reason=reason
 
 
-async def retry_empty_model(call,emit):
+
+async def retry_empty_model(call,emit,on_retry=None):
     for attempt in range(1,MODEL_ATTEMPTS+1):
         try:
             return await call()
-        except EmptyModelResponse:
+        except EmptyModelResponse as exc:
             if attempt==MODEL_ATTEMPTS:
                 raise web.HTTPBadGateway(text='Модель вернула пустой ответ 5 раз. Задание остановлено; каждая подтверждённая попытка учтена.')
-            emit('status',f'Модель вернула пустой ответ. Попытка {attempt}/{MODEL_ATTEMPTS}; повтор через {MODEL_RETRY_DELAY} секунд.')
+            if on_retry is not None:on_retry(exc,attempt)
+            emit('status',f'Модель вернула пустой ответ. Сокращаю контекст; попытка {attempt}/{MODEL_ATTEMPTS}, повтор через {MODEL_RETRY_DELAY} секунд.')
             await asyncio.sleep(MODEL_RETRY_DELAY)
 
 
@@ -53,8 +58,9 @@ def add(store,uid,role,body):
     store.db.commit()
 
 
-def history(store,uid,limit=40):
-    rows=store.db.execute('SELECT role,body FROM creator_messages WHERE owner_id=? ORDER BY created_at DESC,message_id DESC LIMIT ?', (uid,limit))
+def history(store,uid,limit=40,*,include_events=True):
+    clause='' if include_events else " AND role IN ('user','assistant')"
+    rows=store.db.execute('SELECT role,body FROM creator_messages WHERE owner_id=?'+clause+' ORDER BY created_at DESC,message_id DESC LIMIT ?', (uid,limit))
     return [dict(r) for r in reversed(list(rows))]
 
 
@@ -105,30 +111,40 @@ async def check_syntax(code):
         return {'status':'ok' if proc.returncode==0 else 'error','message':'Синтаксис Lua 5.4 корректен. Поведение и игровые действия не проверены.' if proc.returncode==0 else detail or 'Ошибка синтаксиса Lua.'}
 
 
-async def paid_model(store,bot_token,uid,selected,messages):
+async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,max_output=1024,retry_hint=False):
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите купленную модель.')
     row=store.db.execute('SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>0 AND in_flight=0 ORDER BY balance DESC,created_at DESC LIMIT 1',(uid,selected)).fetchone()
     if not row:raise web.HTTPPaymentRequired(text='Нет доступного оплаченного ключа для этой модели.')
     key=ai_gateway.key_for(bot_token,row['order_ref'])
     # Preserve the current task even after long tool transcripts.
     anchor=next((m for m in reversed(messages) if m.get('role')=='user' and m.get('body','').startswith('Задача пользователя: ')),None)
-    tail=messages[-18:] if anchor and anchor not in messages[-18:] else messages[-19:]
-    reserve=len(anchor['body']) if anchor and anchor not in tail else 0
+    tail=messages[-18:] if anchor else messages[-19:]
+    if anchor:tail=[m for m in tail if m is not anchor]
+    reserve=min(len(anchor['body']),max(0,context_size-2000)) if anchor else 0
     bounded=[];size=0
     for m in reversed(tail):
         if m['role'] not in ('user','assistant'):continue
-        remaining=16000-reserve-size
+        remaining=context_size-reserve-size
         if remaining<=0:break
-        body=m['body'][-remaining:];bounded.append({'role':m['role'],'content':body});size+=len(body)
+        body=m['body']
+        if len(body)>remaining:
+            if m['role']=='user' and body.startswith('Результат инструмента:') and remaining>200:
+                body=body[:remaining-50]+'\n[вывод сокращён; запросите нужные строки]'
+            else:
+                continue
+        bounded.append({'role':m['role'],'content':body});size+=len(body)
     ordered=list(reversed(bounded))
-    if reserve:ordered.insert(0,{'role':'user','content':anchor['body']})
-    payload={'model':selected,'max_tokens':1024,'messages':[{'role':'system','content':PROMPT}]+ordered}
+    if reserve:ordered.insert(0,{'role':'user','content':anchor['body'][:reserve]})
+    if retry_hint and len(ordered)<19:ordered.append({'role':'user','content':'Продолжи работу. Верни одно следующее действие в корректном JSON.'})
+    payload={'model':selected,'max_tokens':max_output,'messages':[{'role':'system','content':PROMPT}]+ordered}
     async def get_json():return payload
     fake=SimpleNamespace(headers={'Authorization':'Bearer '+key},app={'store':store,'token':bot_token},json=get_json)
-    result=await ai_gateway.completions(fake)
+    result=await ai_gateway.completions(fake,max_tokens_limit=4096)
     value=json.loads(result.body);choices=value.get('choices') or []
     text=(choices[0].get('message') or {}).get('content') if choices else None
-    if not isinstance(text,str) or not text.strip():raise EmptyModelResponse()
+    if not isinstance(text,str) or not text.strip():
+        reason=choices[0].get('finish_reason','') if choices and isinstance(choices[0],dict) else ''
+        raise EmptyModelResponse(reason)
     return text.strip()[:24000]
 
 
@@ -152,10 +168,15 @@ async def messages(request,authorize):
     selected=data.get('model','')
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель, для которой куплены токены.')
     async def generate(items):
+        settings={'context_size':16000,'max_output':1024,'retry_hint':False}
         async def once():
             async with support_ai.SLOTS:
-                return await paid_model(store,request.app['token'],uid,selected,items)
-        return await retry_empty_model(once,emit)
+                return await paid_model(store,request.app['token'],uid,selected,items,**settings)
+        def adapt(exc,attempt):
+            settings['context_size']=max(6000,settings['context_size']//2)
+            settings['retry_hint']=True
+            if exc.reason=='length':settings['max_output']=min(4096,settings['max_output']*2)
+        return await retry_empty_model(once,emit,adapt)
     now=time.monotonic();recent=[x for x in RATE.get(uid,[]) if x>now-60]
     if len(recent)>=3:raise web.HTTPTooManyRequests(text='Подождите минуту перед следующим запросом.')
     if RUNS.get(uid,{}).get('state')=='running':raise web.HTTPConflict(text='Предыдущее задание ещё выполняется.')
@@ -165,20 +186,24 @@ async def messages(request,authorize):
     for k,v in list(RUNS.items()):
         if v.get('state')!='running' and v.get('started',0)<now-3600:RUNS.pop(k,None)
     RATE[uid]=recent+[now]
-    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now};RUNS[uid]=run
+    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now,'sequence':0};RUNS[uid]=run
     def emit(kind,message):
-        run['events'].append({'kind':kind,'message':str(message)[:1200]})
+        run['sequence']+=1
+        event={'id':run['id']+':'+str(run['sequence']),'kind':kind,'message':str(message)[:1200]}
+        run['events'].append(event)
         if len(run['events'])>32:del run['events'][:-32]
+        # Visible action summaries are persisted as chat events, without model reasoning.
+        try:add(store,uid,'event',json.dumps(event,ensure_ascii=False))
+        except Exception:pass
     async def execute():
         try:
             async with LOCKS[uid%len(LOCKS)]:
-                add(store,uid,'user',text.strip());items=history(store,uid,16)
+                add(store,uid,'user',text.strip());items=history(store,uid,16,include_events=False)
                 result=await creator_agent.run(generate,check_syntax,text.strip(),file_for(store,uid),items[:-1],emit)
                 if result['changed']:
                     save_file(store,uid,result['code'])
                 answer=result['answer'];code=result['code'];check=result['check']
                 add(store,uid,'assistant',answer)
-                emit('status','Задание завершено.')
                 run['state']='done'
                 run['result']={'ok':True,'answer':answer,'code':code,'check':check,'events':list(run['events'])}
         except asyncio.CancelledError:

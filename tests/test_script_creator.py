@@ -31,7 +31,7 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
             resp=await self.client.post('/messages',headers={'uid':'42'},json={'text':'сделай скрипт','model':'glm'})
             data=await resp.json();self.assertTrue(data['ok']);self.assertEqual(data['code'],'br.log("hi")\n');self.assertEqual(data['check']['status'],'ok')
         other=await self.client.get('/messages',headers={'uid':'43'});self.assertEqual((await other.json())['messages'],[])
-        own=await self.client.get('/messages',headers={'uid':'42'});self.assertEqual(len((await own.json())['messages']),2)
+        own=await self.client.get('/messages',headers={'uid':'42'});self.assertEqual(len([m for m in (await own.json())['messages'] if m['role'] in ('user','assistant')]),2)
     async def test_agent_persists_file_and_progress_is_private(self):
         def step(a,**k):return json.dumps({'action':a,**k},ensure_ascii=False)
         model=AsyncMock(side_effect=[step('plan',steps=['Написать','Проверить']),step('write_file',content='print(1)'),step('check_file'),step('finish',message='Готово')])
@@ -48,7 +48,7 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_progress_and_duplicate_block(self):
         gate=asyncio.Event()
-        async def slow(*args):
+        async def slow(*args,**kwargs):
             await gate.wait()
             return json.dumps({'action':'ask','message':'Какое событие использовать?'},ensure_ascii=False)
         with patch.object(creator,'paid_model',side_effect=slow):

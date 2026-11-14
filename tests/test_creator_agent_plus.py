@@ -68,7 +68,7 @@ class LongTaskTests(unittest.IsolatedAsyncioTestCase):
         ai_gateway.issue(store,token,'stars',{'id':'f'*24,'buyer':42,'file_id':'ai:glm'})
         task={'role':'user','body':'Задача пользователя: сделать важную задачу'}
         messages=[task]+[{'role':'user','body':f'Вывод инструмента {i}: '+('a'*1000)} for i in range(30)]
-        async def fake(request):
+        async def fake(request,**kwargs):
             payload=await request.json()
             return web.json_response({'choices':[{'message':{'content':'ok'}}]})
         with patch.object(ai_gateway,'completions',side_effect=fake) as completion:
