@@ -88,15 +88,28 @@ if [ "$(id -u)" -ne 0 ]; then exit 21; fi
 if [ ! -r /etc/os-release ]; then exit 22; fi
 . /etc/os-release
 if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 26.04 ]; then exit 22; fi
-if [ -e /opt/rakcrmp-black ] || id rakcrmp-black >/dev/null 2>&1 || [ -e /etc/systemd/system/rakcrmp-black.service ]; then exit 23; fi
+if [ -e /opt/rakcrmp-black ] || [ -e /opt/rakcrmp-black-runtime ] || [ -e /etc/rakcrmp-black ] || id rakcrmp-black >/dev/null 2>&1 || [ -e /etc/systemd/system/rakcrmp-black.service ]; then exit 23; fi
 command -v systemctl >/dev/null 2>&1 || exit 24
 [ -d /run/systemd/system ] || exit 24
 if systemctl cat rakcrmp-black.service >/dev/null 2>&1; then exit 23; fi
-if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-  apt-get update -qq >/dev/null 2>&1
-  apt-get install -y -qq git python3 >/dev/null 2>&1
-fi
+case "$(uname -m)" in
+  x86_64|amd64) sb_arch=amd64; sb_sha=950af37eb2d7e55dddae34a18411cd617303fd99d2dc75bc76b6dd9fcd97d9c5 ;;
+  aarch64|arm64) sb_arch=arm64; sb_sha=20a6a9cd259a95411599f811a5066513a98db63705a51121252ad27daf96c029 ;;
+  armv7l|armv7) sb_arch=armv7; sb_sha=490461d5a107847080b896d575a6cb74b31b64e2ad8bbb47635f6d227e73d7c8 ;;
+  *) exit 29 ;;
+esac
+apt-get update -qq >/dev/null 2>&1 || exit 27
+apt-get install -y -qq git python3 python3-venv curl ca-certificates >/dev/null 2>&1 || exit 27
 python3 -c 'import sys; assert sys.version_info >= (3,10)' || exit 25
+tmp_dir=$(mktemp -d)
+trap 'rm -rf -- "$tmp_dir"' EXIT
+sb_archive="sing-box-1.11.15-linux-${sb_arch}.tar.gz"
+sb_url="https://github.com/SagerNet/sing-box/releases/download/v1.11.15/${sb_archive}"
+curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 -o "$tmp_dir/$sb_archive" "$sb_url" || exit 28
+printf '%s  %s\\n' "$sb_sha" "$tmp_dir/$sb_archive" | sha256sum -c --status || exit 28
+tar -xOzf "$tmp_dir/$sb_archive" "sing-box-1.11.15-linux-${sb_arch}/sing-box" > "$tmp_dir/sing-box" || exit 28
+chmod 0755 "$tmp_dir/sing-box"
+"$tmp_dir/sing-box" version >/dev/null 2>&1 || exit 28
 useradd --system --user-group --home-dir /opt/rakcrmp-black --shell /usr/sbin/nologin rakcrmp-black
 mkdir /opt/rakcrmp-black
 cd /opt/rakcrmp-black
@@ -104,9 +117,15 @@ git init -q
 git remote add origin https://github.com/creepyside11/black.git
 git fetch -q --depth 1 origin '''+PINNED_COMMIT+'''
 git checkout -q --detach FETCH_HEAD
+python3 -m venv /opt/rakcrmp-black/.venv || exit 30
+/opt/rakcrmp-black/.venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt >/dev/null 2>&1 || exit 30
+/opt/rakcrmp-black/.venv/bin/python -m pip check >/dev/null 2>&1 || exit 30
+install -d -m 0755 /opt/rakcrmp-black-runtime
+install -m 0755 "$tmp_dir/sing-box" /opt/rakcrmp-black-runtime/sing-box
 chown -R rakcrmp-black:rakcrmp-black /opt/rakcrmp-black
+runuser -u rakcrmp-black -- env SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box /opt/rakcrmp-black/.venv/bin/python -c 'import telebot, requests; from logic.vpn_bridge import bridge_available; assert bridge_available()' || exit 30
 install -d -m 0700 /etc/rakcrmp-black
-printf '%s\\n' '''+shlex.quote('TG_BOT_TOKEN='+token)+''' '''+shlex.quote('TG_ADMIN_ID='+admin)+''' > /etc/rakcrmp-black/bot.env
+printf '%s\\n' '''+shlex.quote('TG_BOT_TOKEN='+token)+''' '''+shlex.quote('TG_ADMIN_ID='+admin)+''' 'SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box' > /etc/rakcrmp-black/bot.env
 chmod 0600 /etc/rakcrmp-black/bot.env
 cat > /etc/systemd/system/rakcrmp-black.service <<'SERVICE'
 [Unit]
@@ -119,7 +138,7 @@ User=rakcrmp-black
 Group=rakcrmp-black
 WorkingDirectory=/opt/rakcrmp-black
 EnvironmentFile=/etc/rakcrmp-black/bot.env
-ExecStart=/usr/bin/python3 -u /opt/rakcrmp-black/bot.py
+ExecStart=/opt/rakcrmp-black/.venv/bin/python -u /opt/rakcrmp-black/bot.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -161,7 +180,7 @@ async def start(request, authorize):
                     command='/bin/bash -s' if is_root else 'sudo -n /bin/bash -s'
                     JOBS[jid]['message']='Устанавливаем программу и настраиваем автозапуск. Это может занять несколько минут.'
                     result=await conn.run(command,input=installation_script(token,admin),timeout=600)
-                    messages={21:'Нет прав администратора. Нужен root или sudo без пароля.',22:'На сервере не обнаружена Ubuntu 26.04.',23:'На сервере уже существует установка или служба rakcrmp-black. Ничего не перезаписано.',24:'На сервере не найден systemd.',25:'Нужен Python 3.10 или новее.',26:'Служба создана, но не запустилась. Проверьте журнал на VPS.'}
+                    messages={21:'Нет прав администратора. Нужен root или sudo без пароля.',22:'На сервере не обнаружена Ubuntu 26.04.',23:'На сервере уже существует установка или служба rakcrmp-black. Ничего не перезаписано.',24:'На сервере не найден systemd.',25:'Нужен Python 3.10 или новее.',26:'Служба создана, но не запустилась. Проверьте журнал на VPS.',27:'Не удалось установить системные пакеты. Проверьте интернет и пакетный менеджер VPS.',28:'Не удалось скачать или проверить sing-box. Установка остановлена.',29:'Архитектура VPS не поддерживается установщиком sing-box.',30:'Не удалось установить или проверить Python-зависимости и мост sing-box. На VPS могли остаться файлы установки.'}
                     if result.exit_status!=0:
                         message=messages.get(result.exit_status,'Не удалось завершить установку. На VPS могли остаться созданные файлы; проверьте их перед повтором.')
                         JOBS[jid].update(state='failed',message=message)
