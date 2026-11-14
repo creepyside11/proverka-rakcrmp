@@ -20,6 +20,7 @@ import captcha
 import payments
 import shop
 import support_ai
+import script_creator
 import vps_install
 import vps_panel
 import vps_manage
@@ -46,6 +47,7 @@ def init_tables(store):
     ''')
     store.db.commit()
     support_ai.init(store)
+    script_creator.init(store)
 
 
 def validate_init_data(raw, token, now=None):
@@ -138,6 +140,7 @@ async def support_tickets(request): return await support_ai.tickets(request,auth
 async def support_thread(request): return await support_ai.thread(request,authorize)
 async def support_send(request): return await support_ai.send(request,authorize)
 async def support_avatar(request): return await support_ai.avatar(request,authorize)
+async def creator_messages(request): return await script_creator.messages(request,authorize)
 
 
 async def support_render(request):
@@ -384,7 +387,7 @@ async def process_paid(bot,store):
 @web.middleware
 async def limit_other_bodies(request, handler):
     if request.path != '/api/lua/action' and request.can_read_body:
-        limit = 16000 if request.path.startswith('/api/support/') else 4096
+        limit = 16000 if request.path.startswith(('/api/support/', '/api/creator/')) else 4096
         body=await request.read()
         if len(body)>limit:
             raise web.HTTPRequestEntityTooLarge(max_size=limit,actual_size=len(body))
@@ -410,6 +413,8 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/purchases',purchases)
     server.router.add_post('/api/purchases/install',install_purchase)
     server.router.add_get('/api/install/status',install_status)
+    server.router.add_get('/api/creator/messages',creator_messages)
+    server.router.add_post('/api/creator/messages',creator_messages)
     server.router.add_get('/api/support/info',support_info)
     server.router.add_post('/api/support/settings',support_settings)
     server.router.add_post('/api/support/test',support_test)
