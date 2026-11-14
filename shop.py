@@ -20,6 +20,7 @@ def b(text, *, data=None, url=None, color='primary'):
 def home_markup():
     return Markup([[b('📥 Скачать программу',url=DOWNLOAD,color='success')],
         [Button('🛍 Магазин RakCRMP',web_app=WebAppInfo(url='https://rakcrmp.bothost.tech/'))],
+        [Button('🖥 Установить на VPS',web_app=WebAppInfo(url='https://rakcrmp.bothost.tech/?install=1'))],
         [b('📜 Купить скрипт',data='shop:catalog:scripts'), b('🤖 Купить бота',data='shop:catalog:bots')],
         [b('💜 Поддержать проект',data='shop:donate')], [b('🛟 Поддержка',url=SUPPORT)]])
 

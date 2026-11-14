@@ -18,6 +18,7 @@ from admin_features import joined
 import captcha
 import payments
 import shop
+import vps_install
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
@@ -89,6 +90,16 @@ async def authorize(request, require_subscription=True):
 
 async def index(request):
     return web.FileResponse(INDEX, headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+
+
+async def install_probe(request):
+    return await vps_install.probe(request,authorize)
+
+async def install_start(request):
+    return await vps_install.start(request,authorize)
+
+async def install_status(request):
+    return await vps_install.status(request,authorize)
 
 
 async def asset(request):
@@ -269,11 +280,14 @@ async def process_paid(bot,store):
 
 async def start_server(app,store,token,admin_id):
     server=web.Application(client_max_size=4096)
-    server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id
+    server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id; server['application']=app
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
     server.router.add_get('/assets/{name}',asset)
     server.router.add_post('/api/payment',create_external_payment); server.router.add_post('/api/payment/check',check_external_payment)
     server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
+    server.router.add_post('/api/install/probe',install_probe)
+    server.router.add_post('/api/install/start',install_start)
+    server.router.add_get('/api/install/status',install_status)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()
     except Exception:
