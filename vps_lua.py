@@ -66,11 +66,8 @@ async def connect(request, authorize):
         CONNECTING.discard(uid)
         if conn is not None: conn.close()
 
-async def action(request,authorize):
-    uid=await authorize(request)
-    data=await vi.get_json(request)
+async def execute(uid, sid, data):
     await cleanup()
-    sid=data.pop('session_id',None)
     session=SESSIONS.get(sid) if isinstance(sid,str) else None
     if not session or session['uid']!=uid: raise web.HTTPUnauthorized(text='Подключение истекло. Подключитесь к VPS снова.')
     if data.get('action') not in ALLOWED: raise web.HTTPBadRequest(text='Неизвестная операция.')
@@ -87,7 +84,15 @@ async def action(request,authorize):
     except (asyncssh.Error,OSError,asyncio.TimeoutError,ValueError,json.JSONDecodeError):
         raise web.HTTPBadGateway(text='Не удалось выполнить операцию на VPS. Проверьте подключение и установленную программу.')
     renew(sid,session)
-    return web.json_response(obj['result'],headers={'Cache-Control':'no-store'})
+    return obj['result']
+
+
+async def action(request,authorize):
+    uid=await authorize(request)
+    data=await vi.get_json(request)
+    sid=data.pop('session_id',None)
+    result=await execute(uid,sid,data)
+    return web.json_response(result,headers={'Cache-Control':'no-store'})
 
 async def close(request,authorize):
     uid=await authorize(request)

@@ -1,6 +1,7 @@
 """Telegram Mini App server and Stars purchase flow."""
 import asyncio
 import hashlib
+import io
 import hmac
 import json
 import logging
@@ -22,9 +23,11 @@ import vps_install
 import vps_panel
 import vps_manage
 import vps_lua
+import vps_lua_remote
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
+INSTALL_GUIDE = Path(__file__).with_name('INSTALL_ALL_SYSTEMS_RU.md')
 ASSETS = Path(__file__).with_name('assets')
 ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp', 'characters-cutout.webp', 'captcha-night.webp'))
 delivery_lock = asyncio.Lock()
@@ -120,6 +123,11 @@ async def install_status(request):
     return await vps_install.status(request,authorize)
 
 
+async def install_guide(request):
+    if not INSTALL_GUIDE.is_file(): raise web.HTTPNotFound()
+    return web.FileResponse(INSTALL_GUIDE,headers={'Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff','Content-Type':'text/plain; charset=utf-8'})
+
+
 async def asset(request):
     name = request.match_info['name']
     if name not in ASSET_NAMES:
@@ -153,7 +161,17 @@ async def create_invoice(request):
     except TelegramError:
         log.warning('Не удалось создать Stars-счёт')
         raise web.HTTPBadGateway(text='Не удалось создать счёт. Попробуйте позже.')
-    return web.json_response({'invoice_url':url},headers={'Cache-Control':'no-store'})
+    return web.json_response({'invoice_url':url,'order_id':oid},headers={'Cache-Control':'no-store'})
+
+
+async def check_stars(request):
+    uid=await authorize(request,require_subscription=False)
+    data=await vps_install.get_json(request)
+    oid=data.get('order_id')
+    if not isinstance(oid,str) or not re.fullmatch(r'[0-9a-f]{24}',oid): raise web.HTTPBadRequest(text='Некорректный заказ')
+    order=get_order(request.app['store'],oid)
+    if not order or order['buyer']!=uid: raise web.HTTPNotFound(text='Заказ не найден')
+    return web.json_response({'state':order['state']},headers={'Cache-Control':'no-store'})
 
 
 async def create_external_payment(request):
@@ -184,6 +202,57 @@ async def check_external_payment(request):
     try: state=await shop.check_order(request.app['bot'],request.app['store'],oid,uid)
     except (payments.PaymentError,TelegramError): raise web.HTTPBadGateway(text='Не удалось проверить оплату. Попробуйте позже.')
     return web.json_response({'state':state},headers={'Cache-Control':'no-store'})
+
+
+class LimitedFile(io.BytesIO):
+    def write(self, data):
+        if self.tell()+len(data)>256*1024:
+            raise ValueError('file too large')
+        return super().write(data)
+
+
+def purchased(store, uid, kind, oid):
+    if kind not in ('stars','external') or not isinstance(oid,str) or not re.fullmatch(r'[0-9a-f]{24}',oid): return None
+    table='star_orders' if kind=='stars' else 'orders'
+    row=store.db.execute(f"SELECT id,buyer,name,filename,file_id,state FROM {table} WHERE id=? AND buyer=? AND state IN ('paid','delivered')",(oid,uid)).fetchone()
+    return dict(row) if row else None
+
+
+async def purchases(request):
+    uid=await authorize(request,require_subscription=False)
+    store=request.app['store']; result=[]
+    for kind,table in (('stars','star_orders'),('external','orders')):
+        rows=store.db.execute(f"SELECT id,name,filename,created_at FROM {table} WHERE buyer=? AND state IN ('paid','delivered') ORDER BY created_at DESC LIMIT 200",(uid,))
+        for row in rows:
+            item=dict(row); item['kind']=kind
+            item['installable']=bool(vps_lua_remote.valid_name(item['filename']))
+            result.append(item)
+    result.sort(key=lambda item:item['created_at'],reverse=True)
+    return web.json_response({'purchases':result},headers={'Cache-Control':'no-store'})
+
+
+async def install_purchase(request):
+    uid=await authorize(request,require_subscription=False)
+    data=await vps_install.get_json(request)
+    order=purchased(request.app['store'],uid,data.get('kind'),data.get('order_id'))
+    if not order: raise web.HTTPNotFound(text='Оплаченная покупка не найдена.')
+    name=order['filename']
+    if not vps_lua_remote.valid_name(name): raise web.HTTPBadRequest(text='Автоустановка доступна для файлов .lua с латинским именем; остальные файлы доступны в чате с ботом.')
+    sid=data.get('session_id')
+    # Verify ownership and capabilities before downloading a paid file.
+    info=await vps_lua.execute(uid,sid,{'action':'list'})
+    if not info.get('lua_ready'): raise web.HTTPConflict(text='На VPS не найден Lua-загрузчик. Обновите игровую программу до версии с загрузчиком.')
+    try:
+        remote=await request.app['bot'].get_file(order['file_id'])
+        if remote.file_size is not None and remote.file_size>256*1024: raise ValueError('too large')
+        buffer=LimitedFile()
+        await remote.download_to_memory(out=buffer)
+        text=buffer.getvalue().decode('utf-8-sig')
+        if not text or '\x00' in text: raise ValueError('invalid text')
+    except (TelegramError,ValueError,UnicodeDecodeError,OSError,RuntimeError):
+        raise web.HTTPBadRequest(text='Не удалось получить текстовый Lua-файл размером до 256 КиБ.')
+    result=await vps_lua.execute(uid,sid,{'action':'upload','name':name,'text':text})
+    return web.json_response({'filename':result['saved'],'already':bool(result.get('already')),'started':False},headers={'Cache-Control':'no-store'})
 
 
 async def captcha_get(request):
@@ -309,7 +378,9 @@ async def start_server(app,store,token,admin_id):
     server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id; server['application']=app
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
     server.router.add_get('/assets/{name}',asset)
+    server.router.add_get('/install-guide',install_guide)
     server.router.add_post('/api/payment',create_external_payment); server.router.add_post('/api/payment/check',check_external_payment)
+    server.router.add_post('/api/stars/check',check_stars)
     server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
     server.router.add_post('/api/install/probe',install_probe)
     server.router.add_post('/api/install/start',install_start)
@@ -318,6 +389,8 @@ async def start_server(app,store,token,admin_id):
     server.router.add_post('/api/lua/connect',lua_connect)
     server.router.add_post('/api/lua/action',lua_action)
     server.router.add_post('/api/lua/close',lua_close)
+    server.router.add_get('/api/purchases',purchases)
+    server.router.add_post('/api/purchases/install',install_purchase)
     server.router.add_get('/api/install/status',install_status)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()

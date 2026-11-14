@@ -15,7 +15,7 @@ NAME = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\.lua$', re.I)
 
 
 def valid_name(name):
-    return isinstance(name, str) and bool(NAME.fullmatch(name)) and '..' not in name
+    return isinstance(name, str) and name.endswith('.lua') and bool(NAME.fullmatch(name)) and '..' not in name
 
 
 def regular(path):
@@ -74,7 +74,10 @@ def process(data):
         if not valid_name(name) or not isinstance(text,str) or not text or len(text.encode('utf-8')) > MAX_SCRIPT or '\x00' in text:
             raise ValueError('Нужен текстовый .lua файл до 256 КиБ и корректное имя')
         path = folder/name
-        if path.exists() or path.is_symlink(): raise ValueError('Файл уже существует; выберите другое имя')
+        if path.exists() or path.is_symlink():
+            if not path.is_symlink() and regular(path) and path.stat().st_size<=MAX_SCRIPT and path.read_bytes()==text.encode('utf-8'):
+                return {'saved':name,'already':True}
+            raise ValueError('Файл уже существует; выберите другое имя')
         # No overwrite, even if two uploads race.
         fd = os.open(path, os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
         with os.fdopen(fd,'w',encoding='utf-8') as f: f.write(text)
