@@ -49,7 +49,7 @@ def keys(store,bot_token,uid):
     return [{'name':ai_models.MODELS.get(r['model_key'],r['model_key']),'model':r['model_key'],'balance':r['balance'],'pending':bool(r['in_flight']),'base_url':PUBLIC,'api_token':key_for(bot_token,r['order_ref'])} for r in rows]
 
 
-def _validate(data):
+def _validate(data, *, max_tokens_limit=1024):
     if not isinstance(data,dict) or data.get('stream',False) is not False:raise ValueError('Streaming пока не поддерживается.')
     messages=data.get('messages')
     if not isinstance(messages,list) or not 1<=len(messages)<=20:raise ValueError('Нужно от 1 до 20 сообщений.')
@@ -83,7 +83,7 @@ def _validate(data):
         clean.append({'role':message['role'],'content':content})
     if chars>32000 or images>1:raise ValueError('Превышен размер текста или число изображений.')
     maximum=data.get('max_tokens',512)
-    if isinstance(maximum,bool) or not isinstance(maximum,int) or not 1<=maximum<=1024:raise ValueError('max_tokens должен быть от 1 до 1024.')
+    if isinstance(maximum,bool) or not isinstance(maximum,int) or not 1<=maximum<=max_tokens_limit:raise ValueError(f'max_tokens должен быть от 1 до {max_tokens_limit}.')
     reservation=sum(len((m['content'] if isinstance(m['content'],str) else ''.join(p.get('text','') for p in m['content'])).encode('utf-8')) for m in clean) + images*16384 + maximum + 256
     return clean,maximum,reservation
 
@@ -121,13 +121,13 @@ def settle(store,usage_id,used):
     return True
 
 
-async def completions(request):
+async def completions(request, *, max_tokens_limit=1024):
     auth=request.headers.get('Authorization','')
     if not auth.startswith('Bearer ') or not re.fullmatch(r'rak-[0-9a-f]{64}',auth[7:]):raise web.HTTPUnauthorized(text='Invalid API key')
     store=request.app['store'];row=store.db.execute('SELECT * FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
     if not row:raise web.HTTPUnauthorized(text='Invalid API key')
     row=dict(row)
-    try:data=await request.json();messages,maximum,reservation=_validate(data)
+    try:data=await request.json();messages,maximum,reservation=_validate(data,max_tokens_limit=max_tokens_limit)
     except (ValueError,TypeError):raise web.HTTPBadRequest(text='Некорректный запрос: проверьте messages, изображение и max_tokens.')
     if data.get('model')!=row['model_key']:raise web.HTTPBadRequest(text='Ключ привязан к другой модели.')
     cfg=ai_models.config(store,row['model_key'])

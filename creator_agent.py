@@ -93,14 +93,14 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
                 try:
                     reference=path.read_text(encoding='utf-8')
                     if name=='api':
-                        reference=reference[reference.find('br.walk ='):reference.find('br.walk =')+11000]
-                    result='Справочник '+name+':\n'+reference[:11000]
+                        reference=reference[reference.find('br.walk ='):reference.find('br.walk =')+5000]
+                    result='Справочник '+name+':\n'+reference[:5000]
                     emit('file','Читаю справочник API загрузчика.' if name=='api' else 'Читаю пример скрипта.')
                 except OSError:
                     result='Справочник недоступен.'
         elif kind=='read_file':
             emit('file','Читаю текущий script.lua.' if code else 'Текущий script.lua пока не создан.')
-            result=('Содержимое script.lua:\n'+code) if code else 'Файл пока не создан.'
+            result=('Содержимое script.lua:\n'+code[:6000]+('\n[файл сокращён; используйте read_lines для остальных строк]' if len(code)>6000 else '')) if code else 'Файл пока не создан.'
         elif kind=='read_lines':
             start=action.get('start',1);count=action.get('count',80)
             if isinstance(start,bool) or isinstance(count,bool) or not isinstance(start,int) or not isinstance(count,int) or start<1 or not 1<=count<=120:
