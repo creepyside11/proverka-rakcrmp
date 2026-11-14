@@ -49,34 +49,63 @@ async def retry_empty_model(call,emit,on_retry=None):
 def init(store):
     store.db.executescript('''CREATE TABLE IF NOT EXISTS creator_messages (
       message_id TEXT PRIMARY KEY, owner_id BIGINT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL);
-    CREATE TABLE IF NOT EXISTS creator_files (owner_id BIGINT PRIMARY KEY, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL);''')
+    CREATE TABLE IF NOT EXISTS creator_files (owner_id BIGINT PRIMARY KEY, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL);
+    CREATE TABLE IF NOT EXISTS creator_chats (chat_id TEXT PRIMARY KEY, owner_id BIGINT NOT NULL, title TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL);
+    CREATE TABLE IF NOT EXISTS creator_chat_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, owner_id BIGINT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL);
+    CREATE TABLE IF NOT EXISTS creator_chat_files (chat_id TEXT NOT NULL, owner_id BIGINT NOT NULL, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(chat_id,owner_id));''')
     store.db.commit()
 
 
-def add(store,uid,role,body):
-    store.db.execute('INSERT INTO creator_messages(message_id,owner_id,role,body,created_at) VALUES(?,?,?,?,?)',(secrets.token_hex(16),uid,role,body,time.time()))
+def add(store,uid,role,body,chat='legacy'):
+    if chat=='legacy':
+        store.db.execute('INSERT INTO creator_messages(message_id,owner_id,role,body,created_at) VALUES(?,?,?,?,?)',(secrets.token_hex(16),uid,role,body,time.time()))
+    else:
+        store.db.execute('INSERT INTO creator_chat_messages(message_id,chat_id,owner_id,role,body,created_at) VALUES(?,?,?,?,?,?)',(secrets.token_hex(16),chat,uid,role,body,time.time()))
     store.db.commit()
 
 
-def history(store,uid,limit=40,*,include_events=True):
+def history(store,uid,limit=40,*,include_events=True,chat='legacy'):
     clause='' if include_events else " AND role IN ('user','assistant')"
-    rows=store.db.execute('SELECT role,body FROM creator_messages WHERE owner_id=?'+clause+' ORDER BY created_at DESC,message_id DESC LIMIT ?', (uid,limit))
+    table='creator_messages' if chat=='legacy' else 'creator_chat_messages'
+    scope='' if chat=='legacy' else ' AND chat_id=?'
+    args=(uid,limit) if chat=='legacy' else (uid,chat,limit)
+    rows=store.db.execute('SELECT role,body FROM '+table+' WHERE owner_id=?'+scope+clause+' ORDER BY created_at DESC,message_id DESC LIMIT ?', args)
     return [dict(r) for r in reversed(list(rows))]
 
 
-def file_for(store,uid):
-    row=store.db.execute('SELECT body FROM creator_files WHERE owner_id=?',(uid,)).fetchone()
+def file_for(store,uid,chat='legacy'):
+    row=store.db.execute('SELECT body FROM creator_files WHERE owner_id=?',(uid,)).fetchone() if chat=='legacy' else store.db.execute('SELECT body FROM creator_chat_files WHERE owner_id=? AND chat_id=?',(uid,chat)).fetchone()
     return row['body'] if row else ''
 
 
-def save_file(store,uid,code):
-    store.db.execute('INSERT INTO creator_files(owner_id,body,updated_at) VALUES(?,?,?) ON CONFLICT(owner_id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at',(uid,code,time.time()))
+def save_file(store,uid,code,chat='legacy'):
+    if chat=='legacy':store.db.execute('INSERT INTO creator_files(owner_id,body,updated_at) VALUES(?,?,?) ON CONFLICT(owner_id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at',(uid,code,time.time()))
+    else:store.db.execute('INSERT INTO creator_chat_files(chat_id,owner_id,body,updated_at) VALUES(?,?,?,?) ON CONFLICT(chat_id,owner_id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at',(chat,uid,code,time.time()))
     store.db.commit()
+
+
+def checked_chat(store,uid,chat):
+    if chat=='legacy':return chat
+    if not isinstance(chat,str) or not store.db.execute('SELECT chat_id FROM creator_chats WHERE chat_id=? AND owner_id=?',(chat,uid)).fetchone():
+        raise web.HTTPNotFound(text='Чат не найден.')
+    return chat
+
+
+async def chats(request,authorize):
+    uid=await authorize(request,require_subscription=False);store=request.app['store']
+    if request.method=='POST':
+        chat=secrets.token_urlsafe(18)
+        store.db.execute('INSERT INTO creator_chats(chat_id,owner_id,title,created_at) VALUES(?,?,?,?)',(chat,uid,'Новый чат',time.time()));store.db.commit()
+        return web.json_response({'id':chat,'title':'Новый чат'},headers={'Cache-Control':'no-store'})
+    rows=store.db.execute('SELECT chat_id,title FROM creator_chats WHERE owner_id=? ORDER BY created_at DESC',(uid,))
+    return web.json_response({'chats':[{'id':r['chat_id'],'title':r['title']} for r in rows]+[{'id':'legacy','title':'Предыдущий чат'}]},headers={'Cache-Control':'no-store'})
 
 
 async def progress(request,authorize):
     uid=await authorize(request,require_subscription=False)
     run=RUNS.get(uid)
+    chat=checked_chat(request.app['store'],uid,request.query.get('chat','legacy'))
+    if run and run.get('chat','legacy')!=chat:run=None
     requested=request.query.get('run','')
     if requested and (not run or run['id']!=requested):raise web.HTTPNotFound(text='Задание не найдено или уже устарело.')
     return web.json_response({'id':run['id'] if run else None,'state':run['state'] if run else 'idle','events':list(run['events']) if run else [],'result':run.get('result') if run else None},headers={'Cache-Control':'no-store'})
@@ -160,11 +189,14 @@ async def models(request,authorize):
 
 async def messages(request,authorize):
     uid=await authorize(request,require_subscription=False);store=request.app['store']
-    if request.method=='GET':return web.json_response({'messages':history(store,uid)},headers={'Cache-Control':'no-store'})
+    if request.method=='GET':
+        chat=checked_chat(store,uid,request.query.get('chat','legacy'))
+        return web.json_response({'messages':history(store,uid,chat=chat),'file':file_for(store,uid,chat)},headers={'Cache-Control':'no-store'})
     try:data=await request.json()
     except (TypeError,ValueError):raise web.HTTPBadRequest(text='Некорректный запрос.')
     text=data.get('text') if isinstance(data,dict) else None
     if not isinstance(text,str) or not 1<=len(text.strip())<=4000:raise web.HTTPBadRequest(text='Введите сообщение длиной до 4000 символов.')
+    chat=checked_chat(store,uid,data.get('chat','legacy'))
     selected=data.get('model','')
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель, для которой куплены токены.')
     async def generate(items):
@@ -186,36 +218,40 @@ async def messages(request,authorize):
     for k,v in list(RUNS.items()):
         if v.get('state')!='running' and v.get('started',0)<now-3600:RUNS.pop(k,None)
     RATE[uid]=recent+[now]
-    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now,'sequence':0};RUNS[uid]=run
+    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now,'sequence':0,'chat':chat};RUNS[uid]=run
     def emit(kind,message):
         run['sequence']+=1
         event={'id':run['id']+':'+str(run['sequence']),'kind':kind,'message':str(message)[:1200]}
         run['events'].append(event)
         if len(run['events'])>32:del run['events'][:-32]
         # Visible action summaries are persisted as chat events, without model reasoning.
-        try:add(store,uid,'event',json.dumps(event,ensure_ascii=False))
+        try:add(store,uid,'event',json.dumps(event,ensure_ascii=False),chat)
         except Exception:pass
     async def execute():
         try:
             async with LOCKS[uid%len(LOCKS)]:
-                add(store,uid,'user',text.strip());items=history(store,uid,16,include_events=False)
-                result=await creator_agent.run(generate,check_syntax,text.strip(),file_for(store,uid),items[:-1],emit)
+                add(store,uid,'user',text.strip(),chat);items=history(store,uid,16,include_events=False,chat=chat)
+                if chat!='legacy':
+                    store.db.execute("UPDATE creator_chats SET title=? WHERE chat_id=? AND owner_id=? AND title=?",(text.strip()[:45],chat,uid,'Новый чат'));store.db.commit()
+                result=await creator_agent.run(generate,check_syntax,text.strip(),file_for(store,uid,chat),items[:-1],emit)
                 if result['changed']:
-                    save_file(store,uid,result['code'])
+                    save_file(store,uid,result['code'],chat)
                 answer=result['answer'];code=result['code'];check=result['check']
-                add(store,uid,'assistant',answer)
+                add(store,uid,'assistant',answer,chat)
+                options=result.get('options') or []
+                if options:add(store,uid,'options',json.dumps(options,ensure_ascii=False),chat)
                 run['state']='done'
-                run['result']={'ok':True,'answer':answer,'code':code,'check':check,'events':list(run['events'])}
+                run['result']={'ok':True,'answer':answer,'code':code,'check':check,'options':options,'events':list(run['events'])}
         except asyncio.CancelledError:
             emit('error','Задание прервано; ранее сохранённый файл не изменён.');run['state']='failed'
             run['result']={'ok':False,'message':'Задание прервано.'}
             raise
         except web.HTTPException as exc:
             message=exc.text or 'Не удалось получить ответ ИИ.'
-            add(store,uid,'notice',message);emit('error',message);run['state']='failed'
+            add(store,uid,'notice',message,chat);emit('error',message);run['state']='failed'
             run['result']={'ok':False,'message':message}
         except Exception:
-            add(store,uid,'notice','Не удалось получить ответ ИИ. Попробуйте ещё раз.')
+            add(store,uid,'notice','Не удалось получить ответ ИИ. Попробуйте ещё раз.',chat)
             emit('error','Не удалось завершить задание. Проверьте историю перед повтором.');run['state']='failed'
             run['result']={'ok':False,'message':'Не удалось получить ответ ИИ. Попробуйте ещё раз.'}
         return run.get('result')

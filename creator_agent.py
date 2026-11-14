@@ -21,7 +21,7 @@ AGENT_PROTOCOL = '''Ты агент создания Lua-скриптов. Ис�
 {"action":"append_file","content":"фрагмент Lua"} — добавить фрагмент в конец script.lua;
 {"action":"check_file"} — проверить синтаксис текущего script.lua;
 {"action":"finish","message":"краткий итог пользователю"} — завершить;
-{"action":"ask","message":"каких данных не хватает"} — задать вопрос.
+{"action":"ask","message":"каких данных не хватает","options":["вариант 1","вариант 2"]} — задать вопрос; options: от 2 до 6 кратких вариантов, если они уместны.
 Сначала составь план. Если изменяешь код, запиши его полностью; большой файл записывай частями через append_file. Проверь и исправь ошибки. Используй только инструменты выше. В одном ответе — одно действие. Не выдумывай результат проверки. Никаких скрытых рассуждений в ответе, только действия и краткие пояснения. Не запрашивай пароли и API-ключи. Каждый вызов модели расходует оплаченные токены. Если исходных данных недостаточно, спроси, а не придумывай протокол.'''
 
 
@@ -180,7 +180,9 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
         elif kind=='ask':
             message=action.get('message')
             if not isinstance(message,str) or not message.strip():message='Уточните недостающие данные для скрипта.'
-            return {'answer':message[:4000],'code':None,'changed':False,'check':None}
+            options=action.get('options')
+            if not isinstance(options,list) or not 2<=len(options)<=6 or not all(isinstance(x,str) and 1<=len(x.strip())<=100 for x in options):options=[]
+            return {'answer':message[:4000],'code':None,'changed':False,'check':None,'options':[x.strip() for x in options]}
         else:result='Неизвестное действие. Используй только разрешённые инструменты.'
         if not planned and kind!='plan':result+=' Сначала составь план действием plan.'
         messages.append({'role':'user','body':'Результат инструмента: '+result[:MAX_CODE]})
