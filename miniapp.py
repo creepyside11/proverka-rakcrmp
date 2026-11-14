@@ -19,6 +19,7 @@ import captcha
 import payments
 import shop
 import vps_install
+import vps_panel
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
@@ -97,6 +98,9 @@ async def install_probe(request):
 
 async def install_start(request):
     return await vps_install.start(request,authorize)
+
+async def panel_start(request):
+    return await vps_panel.start(request,authorize)
 
 async def install_status(request):
     return await vps_install.status(request,authorize)
@@ -287,6 +291,7 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/captcha',captcha_get); server.router.add_post('/api/captcha/answer',captcha_answer)
     server.router.add_post('/api/install/probe',install_probe)
     server.router.add_post('/api/install/start',install_start)
+    server.router.add_post('/api/panel/start',panel_start)
     server.router.add_get('/api/install/status',install_status)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()
