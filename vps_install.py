@@ -1,5 +1,6 @@
 """Fixed-purpose VPS installer; SSH credentials are never logged or persisted locally."""
 import asyncio
+import errno
 import ipaddress
 import logging
 import re
@@ -58,9 +59,26 @@ async def probe(request, authorize):
     try:
         async with SLOTS:
             key=await asyncio.wait_for(asyncssh.get_server_host_key(host,port=22,config=None),timeout=12)
-        if key is None: raise OSError('No host key')
-    except (OSError,asyncio.TimeoutError,asyncssh.Error):
-        raise web.HTTPBadGateway(text='Не удалось получить SSH-ключ. Проверьте IP и доступность порта 22.')
+        if key is None:
+            raise web.HTTPBadGateway(text='Сервер ответил, но не предоставил SSH-ключ. Проверьте настройки SSH на VPS.')
+    except asyncio.TimeoutError:
+        raise web.HTTPGatewayTimeout(text='VPS не ответил на SSH-подключение. Проверьте IP, работу VPS и разрешение SSH в настройках провайдера.')
+    except OSError as exc:
+        logging.getLogger('vps_install').warning('SSH probe failed: type=%s errno=%s',type(exc).__name__,exc.errno)
+        if exc.errno == errno.ECONNREFUSED:
+            message='VPS отклонил SSH-подключение. Проверьте, запущен ли SSH на сервере.'
+        elif exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+            message='Нет сетевого маршрута до VPS. Проверьте IP и сетевые ограничения хостинга.'
+        elif exc.errno in (errno.ETIMEDOUT,):
+            message='VPS не ответил на SSH-подключение. Проверьте IP и сетевые настройки VPS.'
+        elif exc.errno in (errno.ECONNRESET, errno.EPIPE):
+            message='VPS разорвал соединение во время проверки SSH. Проверьте настройки сервера.'
+        else:
+            message='Ошибка сети при подключении к VPS. Проверьте IP и доступность SSH.'
+        raise web.HTTPBadGateway(text=message)
+    except asyncssh.Error as exc:
+        logging.getLogger('vps_install').warning('SSH handshake failed: type=%s',type(exc).__name__)
+        raise web.HTTPBadGateway(text='Сервер ответил, но согласовать SSH-ключ не удалось. Проверьте настройки SSH на VPS.')
     key_id=secrets.token_urlsafe(24)
     for k,v in list(PROBES.items()):
         if v['uid']==uid: PROBES.pop(k,None)
