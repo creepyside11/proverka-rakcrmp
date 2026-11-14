@@ -21,6 +21,8 @@ import payments
 import shop
 import support_ai
 import script_creator
+import ai_models
+import ai_gateway
 import vps_install
 import vps_panel
 import vps_manage
@@ -48,6 +50,8 @@ def init_tables(store):
     store.db.commit()
     support_ai.init(store)
     script_creator.init(store)
+    ai_models.init(store)
+    ai_gateway.init(store)
 
 
 def validate_init_data(raw, token, now=None):
@@ -141,6 +145,8 @@ async def support_thread(request): return await support_ai.thread(request,author
 async def support_send(request): return await support_ai.send(request,authorize)
 async def support_avatar(request): return await support_ai.avatar(request,authorize)
 async def creator_messages(request): return await script_creator.messages(request,authorize)
+async def creator_models(request): return await script_creator.models(request,authorize)
+async def ai_account(request): return await ai_gateway.account(request,authorize)
 
 
 async def support_render(request):
@@ -159,7 +165,7 @@ async def catalog(request):
     store=request.app['store']
     products=store.products()
     out=[{'id':p['id'],'name':p['name'],'description':p['description'],'category':p['category'],
-          'stars':price(store,p['id']), 'price_kopecks':p['price_kopecks']} for p in products if p['category'] in ('scripts','bots')]
+          'stars':price(store,p['id']), 'price_kopecks':p['price_kopecks']} for p in products if p['category'] in ('scripts','bots','ai')]
     return web.json_response({'products':out},headers={'Cache-Control':'no-store'})
 
 
@@ -371,6 +377,10 @@ async def deliver_order(bot,store,oid):
     async with delivery_lock:
         order=get_order(store,oid)
         if not order or order['state']!='paid': return
+        if order['file_id'].startswith('ai:'):
+            token=ai_gateway.issue(store,os.environ['BOT_TOKEN'].strip(),'stars',order)
+            await bot.send_message(chat_id=order['buyer'],text='✅ Оплата подтверждена. Ваш ключ ИИ:\nBase URL: '+ai_gateway.PUBLIC+'\nAPI Token: '+token+'\nModel: '+order['file_id'][3:]+'\nБаланс и ключ также доступны в Mini App.')
+            store.db.execute("UPDATE star_orders SET state='delivered' WHERE id=? AND state='paid'",(oid,));store.db.commit();return
         await bot.send_document(chat_id=order['buyer'],document=order['file_id'],filename=order['filename'],caption=('✅ Оплата подтверждена. '+order['name'])[:1024])
         await bot.send_message(chat_id=order['buyer'],text='Инструкция:\n'+order['instruction'])
         store.db.execute("UPDATE star_orders SET state='delivered' WHERE id=? AND state='paid'",(oid,))
@@ -387,7 +397,7 @@ async def process_paid(bot,store):
 @web.middleware
 async def limit_other_bodies(request, handler):
     if request.path != '/api/lua/action' and request.can_read_body:
-        limit = 16000 if request.path.startswith(('/api/support/', '/api/creator/')) else 4096
+        limit = 380000 if request.path.startswith('/v1/') else 16000 if request.path.startswith(('/api/support/', '/api/creator/')) else 4096
         body=await request.read()
         if len(body)>limit:
             raise web.HTTPRequestEntityTooLarge(max_size=limit,actual_size=len(body))
@@ -413,6 +423,11 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/purchases',purchases)
     server.router.add_post('/api/purchases/install',install_purchase)
     server.router.add_get('/api/install/status',install_status)
+    server.router.add_post('/v1/chat/completions',ai_gateway.completions)
+    server.router.add_get('/v1/models',ai_gateway.models)
+    server.router.add_get('/v1/balance',ai_gateway.balance)
+    server.router.add_get('/api/ai/keys',ai_account)
+    server.router.add_get('/api/creator/models',creator_models)
     server.router.add_get('/api/creator/messages',creator_messages)
     server.router.add_post('/api/creator/messages',creator_messages)
     server.router.add_get('/api/support/info',support_info)
