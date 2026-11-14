@@ -21,6 +21,7 @@ import shop
 import vps_install
 import vps_panel
 import vps_manage
+import vps_lua
 
 log = logging.getLogger('miniapp')
 INDEX = Path(__file__).with_name('miniapp.html')
@@ -105,6 +106,15 @@ async def panel_start(request):
 
 async def manage_start(request):
     return await vps_manage.start(request,authorize)
+
+async def lua_connect(request):
+    return await vps_lua.connect(request,authorize)
+
+async def lua_action(request):
+    return await vps_lua.action(request,authorize)
+
+async def lua_close(request):
+    return await vps_lua.close(request,authorize)
 
 async def install_status(request):
     return await vps_install.status(request,authorize)
@@ -286,8 +296,16 @@ async def process_paid(bot,store):
         except TelegramError: log.warning('Не удалось выдать Stars-заказ; повторим')
 
 
+@web.middleware
+async def limit_other_bodies(request, handler):
+    if request.path != '/api/lua/action' and request.can_read_body:
+        body=await request.read()
+        if len(body)>4096:
+            raise web.HTTPRequestEntityTooLarge(max_size=4096,actual_size=len(body))
+    return await handler(request)
+
 async def start_server(app,store,token,admin_id):
-    server=web.Application(client_max_size=4096)
+    server=web.Application(client_max_size=400000,middlewares=[limit_other_bodies])
     server['store']=store; server['bot']=app.bot; server['token']=token; server['admin_id']=admin_id; server['application']=app
     server.router.add_get('/',index); server.router.add_get('/api/catalog',catalog); server.router.add_post('/api/invoice',create_invoice)
     server.router.add_get('/assets/{name}',asset)
@@ -297,6 +315,9 @@ async def start_server(app,store,token,admin_id):
     server.router.add_post('/api/install/start',install_start)
     server.router.add_post('/api/panel/start',panel_start)
     server.router.add_post('/api/manage/start',manage_start)
+    server.router.add_post('/api/lua/connect',lua_connect)
+    server.router.add_post('/api/lua/action',lua_action)
+    server.router.add_post('/api/lua/close',lua_close)
     server.router.add_get('/api/install/status',install_status)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()
