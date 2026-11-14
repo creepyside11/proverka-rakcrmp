@@ -111,9 +111,9 @@ command -v systemctl >/dev/null 2>&1 || exit 24
 [ -d /run/systemd/system ] || exit 24
 if systemctl cat rakcrmp-black.service >/dev/null 2>&1; then exit 23; fi
 case "$(uname -m)" in
-  x86_64|amd64) sb_arch=amd64; sb_sha=950af37eb2d7e55dddae34a18411cd617303fd99d2dc75bc76b6dd9fcd97d9c5 ;;
-  aarch64|arm64) sb_arch=arm64; sb_sha=20a6a9cd259a95411599f811a5066513a98db63705a51121252ad27daf96c029 ;;
-  armv7l|armv7) sb_arch=armv7; sb_sha=490461d5a107847080b896d575a6cb74b31b64e2ad8bbb47635f6d227e73d7c8 ;;
+  x86_64|amd64) sb_arch=amd64; sb_sha=a1ec76e2b6b139eb747a1b1ebee7d14b8d4be5a833596cad8070a31ef960301f ;;
+  aarch64|arm64) sb_arch=arm64; sb_sha=719b76196c8b31efa636b2d8f669e314547e0da0a5ab38a75e1882d307bbd154 ;;
+  armv7l|armv7) sb_arch=armv7; sb_sha=9eedd8eb2d3ea66a48794359d1cc1e32ce618b6e1b105c9cd314da6408c9fc87 ;;
   *) exit 29 ;;
 esac
 apt-get update -qq >/dev/null 2>&1 || exit 27
@@ -121,11 +121,11 @@ apt-get install -y -qq git python3 python3-venv curl ca-certificates >/dev/null 
 python3 -c 'import sys; assert sys.version_info >= (3,10)' || exit 25
 tmp_dir=$(mktemp -d)
 trap 'rm -rf -- "$tmp_dir"' EXIT
-sb_archive="sing-box-1.11.15-linux-${sb_arch}.tar.gz"
-sb_url="https://github.com/SagerNet/sing-box/releases/download/v1.11.15/${sb_archive}"
+sb_archive="sing-box-1.12.25-linux-${sb_arch}.tar.gz"
+sb_url="https://github.com/SagerNet/sing-box/releases/download/v1.12.25/${sb_archive}"
 curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 -o "$tmp_dir/$sb_archive" "$sb_url" || exit 28
 printf '%s  %s\\n' "$sb_sha" "$tmp_dir/$sb_archive" | sha256sum -c --status || exit 28
-tar -xOzf "$tmp_dir/$sb_archive" "sing-box-1.11.15-linux-${sb_arch}/sing-box" > "$tmp_dir/sing-box" || exit 28
+tar -xOzf "$tmp_dir/$sb_archive" "sing-box-1.12.25-linux-${sb_arch}/sing-box" > "$tmp_dir/sing-box" || exit 28
 chmod 0755 "$tmp_dir/sing-box"
 "$tmp_dir/sing-box" version >/dev/null 2>&1 || exit 28
 useradd --system --user-group --home-dir /opt/rakcrmp-black --shell /usr/sbin/nologin rakcrmp-black

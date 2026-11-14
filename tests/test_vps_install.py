@@ -53,7 +53,7 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         script=self.scripts[0]
         self.assertEqual(subprocess.run(['bash','-n'],input=script,text=True,capture_output=True).returncode,0)
         for part in ('python3-venv', 'pip install', '-r requirements.txt', 'import telebot, requests',
-                     'sha256sum -c --status', 'SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box',
+                     'sha256sum -c --status', 'sing-box-1.12.25-linux-', 'SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box',
                      'ExecStart=/opt/rakcrmp-black/.venv/bin/python'):
             self.assertIn(part,script)
         r=await self.client.get('/status',params={'job':job},headers={'uid':'43'});self.assertEqual(r.status,404)

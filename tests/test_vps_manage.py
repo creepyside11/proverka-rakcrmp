@@ -8,7 +8,7 @@ import vps_manage
 
 class ScriptTests(unittest.TestCase):
     def test_fixed_commands_and_syntax(self):
-        for action in (*vps_manage.ACTIONS, 'update_bot'):
+        for action in (*vps_manage.ACTIONS, 'update_bot', 'setup_bridge'):
             script=vps_manage.command_script(action)
             result=subprocess.run(['bash','-n'],input=script,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
@@ -98,3 +98,12 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         result=await (await self.client.get('/status',params={'job':job})).json()
         self.assertEqual(result['state'],'done');self.assertNotIn('private-pass',str(result));self.assertNotIn('private-pass',self.scripts[0]);self.assertIn('disable --now rakcrmp-black.service',self.scripts[0])
         r=await self.client.get('/status',params={'job':job},headers={'uid':'43'});self.assertEqual(r.status,404)
+    async def test_setup_bridge_requests_fixed_script(self):
+        import asyncio
+        data={'probe_id':'test','username':'root','password':'private-pass','confirmed':True,'action':'setup_bridge'}
+        r=await self.client.post('/start',json=data);self.assertEqual(r.status,200);job=(await r.json())['job_id']
+        await asyncio.wait_for(self.tasks[0],10)
+        result=await (await self.client.get('/status',params={'job':job})).json()
+        self.assertEqual(result['state'],'done');self.assertIn('запрос на проверку',result['message'])
+        self.assertEqual(self.scripts[0],vps_manage.command_script('setup_bridge'))
+        self.assertNotIn('private-pass',self.scripts[0])
