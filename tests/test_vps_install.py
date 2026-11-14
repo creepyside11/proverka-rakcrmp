@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import subprocess
 import unittest
 from types import SimpleNamespace
@@ -61,6 +62,17 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.post('/probe',json={'host':'8.8.8.8'});probe=await r.json()
         r=await self.client.post('/start',json={'probe_id':probe['probe_id'],'os':'ubuntu-26.04','username':'root','password':'password','bot_token':TOKEN,'admin_id':'1234','confirmed':False})
         self.assertEqual(r.status,400);self.assertEqual(len(self.tasks),0)
+    async def test_probe_timeout_is_explained_without_credentials(self):
+        async def timeout(*args,**kwargs): raise asyncio.TimeoutError()
+        with patch.object(asyncssh,'get_server_host_key',timeout):
+            r=await self.client.post('/probe',json={'host':'8.8.8.8'})
+        self.assertEqual(r.status,504);text=await r.text()
+        self.assertIn('не ответил',text);self.assertNotIn(TOKEN,text)
+    async def test_probe_connection_refused_is_distinct(self):
+        async def refused(*args,**kwargs): raise ConnectionRefusedError(errno.ECONNREFUSED,'refused')
+        with patch.object(asyncssh,'get_server_host_key',refused):
+            r=await self.client.post('/probe',json={'host':'8.8.8.8'})
+        self.assertEqual(r.status,502);self.assertIn('отклонил',await r.text())
     async def test_probe_cannot_be_used_by_another_user(self):
         r=await self.client.post('/probe',json={'host':'8.8.8.8'});probe=await r.json()
         data={'probe_id':probe['probe_id'],'os':'ubuntu-26.04','username':'root','password':'password','bot_token':TOKEN,'admin_id':'1234','confirmed':True}
