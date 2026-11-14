@@ -145,6 +145,7 @@ async def support_thread(request): return await support_ai.thread(request,author
 async def support_send(request): return await support_ai.send(request,authorize)
 async def support_avatar(request): return await support_ai.avatar(request,authorize)
 async def creator_messages(request): return await script_creator.messages(request,authorize)
+async def creator_progress(request): return await script_creator.progress(request,authorize)
 async def creator_models(request): return await script_creator.models(request,authorize)
 async def ai_account(request): return await ai_gateway.account(request,authorize)
 
@@ -428,6 +429,7 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/v1/balance',ai_gateway.balance)
     server.router.add_get('/api/ai/keys',ai_account)
     server.router.add_get('/api/creator/models',creator_models)
+    server.router.add_get('/api/creator/progress',creator_progress)
     server.router.add_get('/api/creator/messages',creator_messages)
     server.router.add_post('/api/creator/messages',creator_messages)
     server.router.add_get('/api/support/info',support_info)
