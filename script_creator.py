@@ -21,6 +21,24 @@ LOCKS=[asyncio.Lock() for _ in range(64)]
 RATE={}
 RUNS={}
 MAX_CODE=128*1024
+MODEL_ATTEMPTS=5
+MODEL_RETRY_DELAY=10
+
+
+class EmptyModelResponse(Exception):
+    """Provider returned a billed response without usable content."""
+
+
+async def retry_empty_model(call,emit):
+    for attempt in range(1,MODEL_ATTEMPTS+1):
+        try:
+            return await call()
+        except EmptyModelResponse:
+            if attempt==MODEL_ATTEMPTS:
+                raise web.HTTPBadGateway(text='Модель вернула пустой ответ 5 раз. Задание остановлено; каждая подтверждённая попытка учтена.')
+            emit('status',f'Модель вернула пустой ответ. Попытка {attempt}/{MODEL_ATTEMPTS}; повтор через {MODEL_RETRY_DELAY} секунд.')
+            await asyncio.sleep(MODEL_RETRY_DELAY)
+
 
 
 def init(store):
@@ -92,19 +110,25 @@ async def paid_model(store,bot_token,uid,selected,messages):
     row=store.db.execute('SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>0 AND in_flight=0 ORDER BY balance DESC,created_at DESC LIMIT 1',(uid,selected)).fetchone()
     if not row:raise web.HTTPPaymentRequired(text='Нет доступного оплаченного ключа для этой модели.')
     key=ai_gateway.key_for(bot_token,row['order_ref'])
+    # Preserve the current task even after long tool transcripts.
+    anchor=next((m for m in reversed(messages) if m.get('role')=='user' and m.get('body','').startswith('Задача пользователя: ')),None)
+    tail=messages[-18:] if anchor and anchor not in messages[-18:] else messages[-19:]
+    reserve=len(anchor['body']) if anchor and anchor not in tail else 0
     bounded=[];size=0
-    for m in reversed(messages[-19:]):
+    for m in reversed(tail):
         if m['role'] not in ('user','assistant'):continue
-        remaining=16000-size
+        remaining=16000-reserve-size
         if remaining<=0:break
         body=m['body'][-remaining:];bounded.append({'role':m['role'],'content':body});size+=len(body)
-    payload={'model':selected,'max_tokens':1024,'messages':[{'role':'system','content':PROMPT}]+list(reversed(bounded))}
+    ordered=list(reversed(bounded))
+    if reserve:ordered.insert(0,{'role':'user','content':anchor['body']})
+    payload={'model':selected,'max_tokens':1024,'messages':[{'role':'system','content':PROMPT}]+ordered}
     async def get_json():return payload
     fake=SimpleNamespace(headers={'Authorization':'Bearer '+key},app={'store':store,'token':bot_token},json=get_json)
     result=await ai_gateway.completions(fake)
     value=json.loads(result.body);choices=value.get('choices') or []
     text=(choices[0].get('message') or {}).get('content') if choices else None
-    if not isinstance(text,str) or not text.strip():raise ValueError('empty response')
+    if not isinstance(text,str) or not text.strip():raise EmptyModelResponse()
     return text.strip()[:24000]
 
 
@@ -128,8 +152,10 @@ async def messages(request,authorize):
     selected=data.get('model','')
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель, для которой куплены токены.')
     async def generate(items):
-        async with support_ai.SLOTS:
-            return await paid_model(store,request.app['token'],uid,selected,items)
+        async def once():
+            async with support_ai.SLOTS:
+                return await paid_model(store,request.app['token'],uid,selected,items)
+        return await retry_empty_model(once,emit)
     now=time.monotonic();recent=[x for x in RATE.get(uid,[]) if x>now-60]
     if len(recent)>=3:raise web.HTTPTooManyRequests(text='Подождите минуту перед следующим запросом.')
     if RUNS.get(uid,{}).get('state')=='running':raise web.HTTPConflict(text='Предыдущее задание ещё выполняется.')
