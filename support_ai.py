@@ -59,6 +59,7 @@ def validate_base(value):
         port=p.port
     except ValueError: raise ValueError('Некорректный адрес или порт.')
     if p.scheme!='https' or not p.hostname or p.username or p.password or p.query or p.fragment: raise ValueError('Нужен HTTPS Base URL без пароля и параметров.')
+    if p.path.rstrip('/').endswith('/chat/completions'): raise ValueError('Укажите Base URL без /chat/completions на конце.')
     host=p.hostname.lower().rstrip('.')
     if host=='localhost' or host.endswith(('.localhost','.local','.internal')): raise ValueError('Нужен публичный адрес провайдера.')
     try:
@@ -73,9 +74,11 @@ def save_config(store, bot_token, data):
     base=validate_base(data.get('base_url'))
     model=data.get('model');token=data.get('api_token','');extra=data.get('extra_prompt','')
     if not isinstance(model,str) or not 1<=len(model.strip())<=200 or any(c in model for c in '\r\n\x00'): raise ValueError('Укажите ID модели.')
-    if not isinstance(token,str) or len(token)>2048 or any(c in token for c in '\r\n\x00'): raise ValueError('Некорректный токен.')
+    if not isinstance(token,str) or len(token)>2048 or '\x00' in token: raise ValueError('Некорректный токен.')
     if not isinstance(extra,str) or len(extra)>6000: raise ValueError('Дополнительная инструкция слишком длинная.')
     token=token.strip()
+    if token.lower().startswith('bearer '): token=token[7:].strip()
+    if token and any(c.isspace() for c in token): raise ValueError('Токен не должен содержать пробелы.')
     current=config(store)
     encrypted=crypt(bot_token).encrypt(token.encode()).decode() if token else (current['token_cipher'] if current else '')
     if not encrypted: raise ValueError('Укажите API Token.')
@@ -141,6 +144,42 @@ async def request_model(settings,token,messages):
     text=response.choices[0].message.content.strip()
     if not text: raise ValueError('empty response')
     return text[:6000]
+
+
+def error_details(exc):
+    # Never expose the provider response body or exception text, which may contain a token.
+    try:
+        from openai import AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APITimeoutError, APIConnectionError
+    except ImportError:
+        return 'sdk_missing', 'На хостинге не установлен OpenAI SDK. Обновите зависимости бота.'
+    if isinstance(exc,AuthenticationError): return 'auth', 'Провайдер отклонил авторизацию. Проверьте API Token и Base URL; токен Telegram не подходит.'
+    if isinstance(exc,PermissionDeniedError): return 'permission', 'Провайдер запретил доступ. Проверьте права ключа и доступность модели.'
+    if isinstance(exc,NotFoundError): return 'not_found', 'Провайдер не нашёл модель или адрес API. Проверьте Base URL и ID модели.'
+    if isinstance(exc,RateLimitError): return 'rate_limit', 'Провайдер отклонил запрос из-за лимита или квоты. Проверьте лимиты у провайдера.'
+    if isinstance(exc,APITimeoutError): return 'timeout', 'Провайдер слишком долго отвечает. Попробуйте ещё раз.'
+    if isinstance(exc,APIConnectionError): return 'network', 'Не удалось подключиться к провайдеру. Проверьте Base URL и сеть хостинга.'
+    return 'provider_error', 'Не удалось получить ответ. Проверьте совместимость модели и настройки провайдера.'
+
+
+async def test_api(request,authorize):
+    uid=await authorize(request,require_subscription=False);app=request.app
+    if uid!=app['admin_id']: raise web.HTTPForbidden(text='Только администратор может проверить настройки.')
+    cfg=config(app['store'])
+    if not cfg or not cfg['token_cipher']: raise web.HTTPServiceUnavailable(text='Сначала сохраните настройки ИИ.')
+    try: token=crypt(app['token']).decrypt(cfg['token_cipher'].encode()).decode()
+    except (InvalidToken,ValueError): raise web.HTTPServiceUnavailable(text='Сохраните API Token заново.')
+    try: validate_base(cfg['base_url'])
+    except ValueError as exc: raise web.HTTPBadRequest(text=str(exc))
+    now=time.monotonic();key=('test',uid);recent=[x for x in LAST.get(key,[]) if x>now-60]
+    if len(recent)>=3: raise web.HTTPTooManyRequests(text='Подождите минуту перед следующей проверкой.')
+    LAST[key]=recent+[now]
+    try:
+        async with SLOTS: answer=await request_model(cfg,token,[{'role':'user','body':'Ответь одним словом: OK'}])
+    except Exception as exc:
+        code,message=error_details(exc)
+        log.warning('Проверка ИИ поддержки не прошла: %s',code)
+        return web.json_response({'ok':False,'code':code,'message':message},headers={'Cache-Control':'no-store'})
+    return web.json_response({'ok':True,'message':'Модель ответила: подключение работает.'},headers={'Cache-Control':'no-store'})
 
 
 async def info(request,authorize):

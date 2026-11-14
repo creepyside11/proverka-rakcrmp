@@ -25,9 +25,10 @@ class SupportTests(unittest.IsolatedAsyncioTestCase):
         async def info(r):return await support.info(r,miniapp.authorize)
         async def settings(r):return await support.settings_api(r,miniapp.authorize)
         async def tickets(r):return await support.tickets(r,miniapp.authorize)
+        async def check(r):return await support.test_api(r,miniapp.authorize)
         async def thread(r):return await support.thread(r,miniapp.authorize)
         async def send(r):return await support.send(r,miniapp.authorize)
-        app.router.add_get('/info',info);app.router.add_post('/settings',settings);app.router.add_get('/tickets',tickets);app.router.add_post('/tickets',tickets)
+        app.router.add_get('/info',info);app.router.add_post('/settings',settings);app.router.add_post('/test',check);app.router.add_get('/tickets',tickets);app.router.add_post('/tickets',tickets)
         app.router.add_get('/tickets/{number}',thread);app.router.add_post('/tickets/{number}/messages',send)
         self.client=TestClient(TestServer(app));await self.client.start_server()
     async def asyncTearDown(self):await self.client.close();self.store.db.close()
@@ -45,6 +46,27 @@ class SupportTests(unittest.IsolatedAsyncioTestCase):
         for base in ('http://example.com','https://127.0.0.1/v1','https://user:pw@example.com','https://localhost'):
             payload={'base_url':base,'model':'m','api_token':'x'}
             self.assertEqual((await self.client.post('/settings',headers=self.h(99),json=payload)).status,400)
+    async def test_admin_can_run_safe_diagnostic(self):
+        from openai import AuthenticationError
+        await self.configure()
+        self.assertEqual((await self.client.post('/test',headers=self.h(42),json={})).status,403)
+        req=httpx.Request('POST','https://example.com/v1/chat/completions')
+        response=httpx.Response(401,request=req)
+        error=AuthenticationError('private-secret',response=response,body={'secret':'private-secret'})
+        with patch('support_ai.request_model',side_effect=error):
+            r=await self.client.post('/test',headers=self.h(99),json={})
+        result=await r.json();self.assertEqual(result['code'],'auth');self.assertIn('API Token',result['message']);self.assertNotIn('private-secret',str(result))
+        with patch('support_ai.request_model',return_value='OK'):
+            r=await self.client.post('/test',headers=self.h(99),json={})
+        self.assertTrue((await r.json())['ok'])
+
+    async def test_bearer_token_is_normalized(self):
+        r=await self.client.post('/settings',headers=self.h(99),json={'base_url':'https://example.com/v1','model':'m','api_token':'  Bearer actual-key\n ','extra_prompt':''})
+        self.assertEqual(r.status,200)
+        self.assertEqual(support.crypt(TOKEN).decrypt(support.config(self.store)['token_cipher'].encode()).decode(),'actual-key')
+        r=await self.client.post('/settings',headers=self.h(99),json={'base_url':'https://example.com/v1/chat/completions','model':'m','api_token':'x'})
+        self.assertEqual(r.status,400)
+
     async def test_bot_token_rotation_requires_model_token_again(self):
         await self.configure()
         self.assertRaises(ValueError,support.save_config,self.store,'different-bot-token',{'base_url':'https://example.com/v1','model':'m','api_token':'','extra_prompt':''})

@@ -132,6 +132,7 @@ async def install_guide(request):
 
 async def support_info(request): return await support_ai.info(request,authorize)
 async def support_settings(request): return await support_ai.settings_api(request,authorize)
+async def support_test(request): return await support_ai.test_api(request,authorize)
 async def support_tickets(request): return await support_ai.tickets(request,authorize)
 async def support_thread(request): return await support_ai.thread(request,authorize)
 async def support_send(request): return await support_ai.send(request,authorize)
@@ -404,6 +405,7 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/install/status',install_status)
     server.router.add_get('/api/support/info',support_info)
     server.router.add_post('/api/support/settings',support_settings)
+    server.router.add_post('/api/support/test',support_test)
     server.router.add_get('/api/support/tickets',support_tickets)
     server.router.add_post('/api/support/tickets',support_tickets)
     server.router.add_get('/api/support/tickets/{number}',support_thread)
