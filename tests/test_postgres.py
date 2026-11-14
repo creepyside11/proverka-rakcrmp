@@ -40,6 +40,18 @@ class PostgresIntegration(unittest.TestCase):
         self.assertEqual(s.donation('d1')['state'],'notified')
         self.assertEqual(s.pending_donations(),[])
 
+    def test_support_storage_postgresql(self):
+        import support_ai
+        support_ai.init(self.store)
+        for table in ('support_messages','support_tickets','support_settings'):
+            self.store.db.execute('DELETE FROM '+table)
+        support_ai.save_config(self.store,'bot-token',{'base_url':'https://example.com/v1','model':'test-model','api_token':'secret','extra_prompt':''})
+        number=support_ai.new_ticket(self.store,42)
+        support_ai.add_message(self.store,number,'user','Помогите')
+        self.assertEqual(support_ai.get_ticket(self.store,number)['owner_id'],42)
+        self.assertEqual(support_ai.get_messages(self.store,number)[0]['body'],'Помогите')
+        self.assertNotIn('secret',support_ai.config(self.store)['token_cipher'])
+
     def test_migration_of_existing_sqlite(self):
         import subprocess
         import sys

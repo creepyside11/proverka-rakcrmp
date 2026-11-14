@@ -19,6 +19,7 @@ from admin_features import joined
 import captcha
 import payments
 import shop
+import support_ai
 import vps_install
 import vps_panel
 import vps_manage
@@ -43,6 +44,7 @@ def init_tables(store):
       charge_id TEXT UNIQUE, created_at REAL NOT NULL);
     ''')
     store.db.commit()
+    support_ai.init(store)
 
 
 def validate_init_data(raw, token, now=None):
@@ -126,6 +128,13 @@ async def install_status(request):
 async def install_guide(request):
     if not INSTALL_GUIDE.is_file(): raise web.HTTPNotFound()
     return web.FileResponse(INSTALL_GUIDE,headers={'Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff','Content-Type':'text/plain; charset=utf-8'})
+
+
+async def support_info(request): return await support_ai.info(request,authorize)
+async def support_settings(request): return await support_ai.settings_api(request,authorize)
+async def support_tickets(request): return await support_ai.tickets(request,authorize)
+async def support_thread(request): return await support_ai.thread(request,authorize)
+async def support_send(request): return await support_ai.send(request,authorize)
 
 
 async def asset(request):
@@ -368,9 +377,10 @@ async def process_paid(bot,store):
 @web.middleware
 async def limit_other_bodies(request, handler):
     if request.path != '/api/lua/action' and request.can_read_body:
+        limit = 16000 if request.path.startswith('/api/support/') else 4096
         body=await request.read()
-        if len(body)>4096:
-            raise web.HTTPRequestEntityTooLarge(max_size=4096,actual_size=len(body))
+        if len(body)>limit:
+            raise web.HTTPRequestEntityTooLarge(max_size=limit,actual_size=len(body))
     return await handler(request)
 
 async def start_server(app,store,token,admin_id):
@@ -392,6 +402,12 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/api/purchases',purchases)
     server.router.add_post('/api/purchases/install',install_purchase)
     server.router.add_get('/api/install/status',install_status)
+    server.router.add_get('/api/support/info',support_info)
+    server.router.add_post('/api/support/settings',support_settings)
+    server.router.add_get('/api/support/tickets',support_tickets)
+    server.router.add_post('/api/support/tickets',support_tickets)
+    server.router.add_get('/api/support/tickets/{number}',support_thread)
+    server.router.add_post('/api/support/tickets/{number}/messages',support_send)
     runner=web.AppRunner(server,access_log=None); await runner.setup()
     try: await web.TCPSite(runner,'0.0.0.0',int(os.getenv('PORT','3000'))).start()
     except Exception:
