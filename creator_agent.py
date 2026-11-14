@@ -1,14 +1,22 @@
 """Bounded, single-file Lua agent. Generated code is never executed."""
 import json
+import difflib
 import re
 from pathlib import Path
 
-MAX_STEPS = 8
+MAX_STEPS = 12
 MAX_CODE = 32 * 1024
 AGENT_PROTOCOL = '''Ты агент создания Lua-скриптов. Используй только следующие инструменты, отвечая ОДНИМ JSON-объектом без markdown:
 {"action":"plan","steps":["шаг 1","шаг 2"]} — план из 1–6 коротких пунктов;
 {"action":"read_reference","name":"api"} — прочитать API загрузчика; name="example" — посмотреть пример;
 {"action":"read_file"} — прочитать текущий script.lua;
+{"action":"read_lines","start":1,"count":80} — прочитать диапазон строк script.lua;
+{"action":"search_file","text":"строка"} — найти текст в файле;
+{"action":"outline"} — посмотреть объявления функций;
+{"action":"replace_text","old":"точный старый текст","new":"новый текст"} — изменить одно уникальное совпадение;
+{"action":"show_diff"} — сравнить текущую версию с начальной;
+{"action":"checkpoint"} — сохранить временную точку возврата;
+{"action":"restore_checkpoint"} — вернуть временную точку возврата;
 {"action":"write_file","content":"полный текст Lua"} — создать или заменить script.lua;
 {"action":"append_file","content":"фрагмент Lua"} — добавить фрагмент в конец script.lua;
 {"action":"check_file"} — проверить синтаксис текущего script.lua;
@@ -37,7 +45,7 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
     """Interpret the model's restricted actions; return candidate and honest checks."""
     messages=list(history)+[{'role':'user','body':'Задача пользователя: '+user_text}]
     code=previous_code or ''
-    changed=False;last_check=None;last_checked_code=None;planned=False
+    changed=False;last_check=None;last_checked_code=None;planned=False;checkpoint=None
     emit('status','Анализирую задачу и составляю план.')
     for step in range(MAX_STEPS):
         text=await generate(messages)
@@ -64,7 +72,7 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
                 continue
             return {'answer':text[:12000],'code':None,'changed':False,'check':None}
         kind=action['action'];messages.append({'role':'assistant','body':text})
-        if not planned and kind in ('write_file','append_file','check_file','finish'):
+        if not planned and kind in ('write_file','append_file','replace_text','check_file','finish'):
             messages.append({'role':'user','body':'Сначала составь план действием plan, затем выполняй инструменты.'})
             continue
         if kind=='plan':
@@ -93,19 +101,63 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
         elif kind=='read_file':
             emit('file','Читаю текущий script.lua.' if code else 'Текущий script.lua пока не создан.')
             result=('Содержимое script.lua:\n'+code) if code else 'Файл пока не создан.'
+        elif kind=='read_lines':
+            start=action.get('start',1);count=action.get('count',80)
+            if isinstance(start,bool) or isinstance(count,bool) or not isinstance(start,int) or not isinstance(count,int) or start<1 or not 1<=count<=120:
+                result='Укажите start >= 1 и count от 1 до 120.'
+            elif not code:
+                result='Файл пока не создан.'
+            else:
+                lines=code.splitlines();result='\n'.join(f'{i+1}: {line[:500]}' for i,line in enumerate(lines) if start-1<=i<start-1+count)[:8000] or 'В этом диапазоне строк нет.'
+                emit('file',f'Читаю строки {start}–{start+count-1} script.lua.')
+        elif kind=='search_file':
+            query=action.get('text')
+            if not isinstance(query,str) or not 1<=len(query)<=120:
+                result='Укажите строку поиска длиной от 1 до 120 символов.'
+            else:
+                matches=[f'{i}: {line[:400]}' for i,line in enumerate(code.splitlines(),1) if query in line]
+                result='\n'.join(matches[:30])[:8000] if matches else 'Совпадений нет.'
+                emit('file','Ищу текст в script.lua.')
+        elif kind=='outline':
+            names=[]
+            for i,line in enumerate(code.splitlines(),1):
+                if re.match(r'^\s*(?:local\s+)?function\s+[\w.:]+\s*\(',line):names.append(f'{i}: {line.strip()[:240]}')
+            result='\n'.join(names[:100])[:8000] if names else 'Объявлений вида function name(...) не найдено.'
+            emit('file','Просматриваю объявления функций в script.lua.')
+        elif kind=='replace_text':
+            old=action.get('old');new=action.get('new')
+            if not isinstance(old,str) or not old or not isinstance(new,str):
+                result='Укажите непустой old и строку new.'
+            elif code.count(old)!=1:
+                result=f'Найдено совпадений: {code.count(old)}. Для безопасной замены нужно ровно одно.'
+            elif len(code.replace(old,new,1).encode('utf-8'))>MAX_CODE:
+                result='Изменение превысит размер файла 32 КБ.'
+            else:
+                code=code.replace(old,new,1);changed=(code!=(previous_code or ''));last_check=None;last_checked_code=None
+                emit('file','Изменён фрагмент script.lua.');result='Фрагмент изменён. Проверь синтаксис.'
+        elif kind=='show_diff':
+            result=''.join(difflib.unified_diff((previous_code or '').splitlines(keepends=True),code.splitlines(keepends=True),fromfile='до/script.lua',tofile='после/script.lua'))[:8000] or 'Изменений нет.'
+            emit('file','Сравниваю текущую и исходную версии.')
+        elif kind=='checkpoint':
+            checkpoint=code;result='Временная точка возврата сохранена.';emit('file','Сохранена временная точка возврата.')
+        elif kind=='restore_checkpoint':
+            if checkpoint is None:result='Точка возврата ещё не создана.'
+            else:
+                code=checkpoint;changed=(code!=(previous_code or ''));last_check=None;last_checked_code=None
+                result='Файл восстановлен к точке возврата.';emit('file','Восстановлена временная версия script.lua.')
         elif kind=='write_file':
             value=action.get('content')
             if not isinstance(value,str) or not value.strip() or len(value.encode('utf-8'))>MAX_CODE:
                 result='Файл пуст или больше 32 КБ; изменения не применены.'
             else:
-                code=value;changed=True;last_check=None;last_checked_code=None
+                code=value;changed=(code!=(previous_code or ''));last_check=None;last_checked_code=None
                 emit('file','Обновлён script.lua.');result='Файл обновлён. Проверь синтаксис.'
         elif kind=='append_file':
             value=action.get('content')
             if not isinstance(value,str) or not value or not code or len((code+value).encode('utf-8'))>MAX_CODE:
                 result='Нельзя добавить фрагмент: файл отсутствует, фрагмент пуст или превышен размер 32 КБ.'
             else:
-                code+=value;changed=True;last_check=None;last_checked_code=None
+                code+=value;changed=(code!=(previous_code or ''));last_check=None;last_checked_code=None
                 emit('file','Добавлен фрагмент в script.lua.');result='Фрагмент добавлен. Продолжай или проверь файл.'
         elif kind=='check_file':
             if not code:result='Файл отсутствует; проверять нечего.'
