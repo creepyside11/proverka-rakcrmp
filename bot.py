@@ -295,7 +295,7 @@ async def ai_resolve(update,context):
 async def stars_admin(update, context):
     if not owner(update) or update.effective_chat.type != 'private': return
     if not context.args:
-        products=store.products(all_items=True)
+        products=[p for p in store.products(all_items=True) if p['category']!='ai' and not p['file_id'].startswith('ai:')]
         if not products:
             await update.effective_message.reply_text('Сначала добавьте товары через /admin.'); return
         rows=[f"{p['id']} — {p['name'][:70]}: {miniapp.price(store,p['id']) or 'не задано'} ⭐" for p in products[:40]]

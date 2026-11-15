@@ -23,6 +23,7 @@ import support_ai
 import script_creator
 import ai_models
 import ai_gateway
+import free_tokens
 import vps_install
 import vps_panel
 import vps_manage
@@ -34,7 +35,7 @@ INDEX = Path(__file__).with_name('miniapp.html')
 INSTALL_GUIDE = Path(__file__).with_name('INSTALL_ALL_SYSTEMS_RU.md')
 SUPPORT_RENDER = Path(__file__).with_name('support_render.js')
 ASSETS = Path(__file__).with_name('assets')
-ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp', 'characters-cutout.webp', 'captcha-night.webp'))
+ASSET_NAMES = frozenset(('characters.jpeg', 'background.jpeg', 'black-russia.jpeg', 'rakcrmp.webp', 'characters-cutout.webp', 'captcha-night.webp', 'wikivibe-banner.webp'))
 delivery_lock = asyncio.Lock()
 
 
@@ -52,6 +53,7 @@ def init_tables(store):
     script_creator.init(store)
     ai_models.init(store)
     ai_gateway.init(store)
+    free_tokens.init(store)
 
 
 def validate_init_data(raw, token, now=None):
@@ -150,6 +152,7 @@ async def creator_models(request): return await script_creator.models(request,au
 async def creator_chats(request): return await script_creator.chats(request,authorize)
 async def creator_stop(request): return await script_creator.stop(request,authorize)
 async def ai_account(request): return await ai_gateway.account(request,authorize)
+async def free_ai_tokens(request): return await free_tokens.endpoint(request,authorize)
 
 
 async def support_render(request):
@@ -168,7 +171,7 @@ async def catalog(request):
     store=request.app['store']
     products=store.products()
     out=[{'id':p['id'],'name':p['name'],'description':p['description'],'category':p['category'],
-          'stars':price(store,p['id']), 'price_kopecks':p['price_kopecks']} for p in products if p['category'] in ('scripts','bots','ai')]
+          'stars':price(store,p['id']), 'price_kopecks':p['price_kopecks']} for p in products if p['category'] in ('scripts','bots') and not p['file_id'].startswith('ai:')]
     return web.json_response({'products':out},headers={'Cache-Control':'no-store'})
 
 
@@ -179,7 +182,7 @@ async def create_invoice(request):
     product_id=data.get('product_id') if isinstance(data,dict) else None
     if not isinstance(product_id,str) or len(product_id)>64: raise web.HTTPBadRequest(text='Некорректный товар')
     store=request.app['store']; product=store.product(product_id); stars=price(store,product_id)
-    if not product or not product['active'] or not stars: raise web.HTTPNotFound(text='Товар недоступен для покупки')
+    if not product or not product['active'] or product['category']=='ai' or product['file_id'].startswith('ai:') or not stars: raise web.HTTPNotFound(text='Товар недоступен для покупки')
     oid=secrets.token_hex(12)
     store.db.execute('INSERT INTO star_orders(id,buyer,product_id,stars,name,file_id,filename,instruction,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
        (oid,uid,product_id,stars,product['name'],product['file_id'],product['filename'],product['instruction'],'pending',time.time()))
@@ -211,7 +214,7 @@ async def create_external_payment(request):
     if not isinstance(product_id,str) or len(product_id)>64 or provider not in ('crypto','sbp','card'):
         raise web.HTTPBadRequest(text='Некорректный товар или способ оплаты')
     store=request.app['store']; product=store.product(product_id)
-    if not product or not product['active']: raise web.HTTPNotFound(text='Товар недоступен')
+    if not product or not product['active'] or product['category']=='ai' or product['file_id'].startswith('ai:'): raise web.HTTPNotFound(text='Товар недоступен')
     oid=secrets.token_hex(12)
     try: provider_id,url=await payments.create(provider,oid,uid,product['price_kopecks'],product['name'])
     except payments.PaymentError: raise web.HTTPBadGateway(text='Платёжный сервис не настроен или временно недоступен.')
@@ -430,6 +433,8 @@ async def start_server(app,store,token,admin_id):
     server.router.add_get('/v1/models',ai_gateway.models)
     server.router.add_get('/v1/balance',ai_gateway.balance)
     server.router.add_get('/api/ai/keys',ai_account)
+    server.router.add_get('/api/ai/free',free_ai_tokens)
+    server.router.add_post('/api/ai/free',free_ai_tokens)
     server.router.add_post('/api/creator/stop',creator_stop)
     server.router.add_get('/api/creator/chats',creator_chats)
     server.router.add_post('/api/creator/chats',creator_chats)

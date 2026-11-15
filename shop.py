@@ -191,7 +191,7 @@ async def callback(update, context, store, admin_id):
             context.user_data['product_draft']={'step':'category'}
             await q.message.reply_text('Новый товар. Отправь 1 — скрипт, 2 — бот. Для отмены: /cancel.')
         elif sub == 'list':
-            products = store.products(all_items=True)
+            products = [p for p in store.products(all_items=True) if p['category']!='ai' and not p['file_id'].startswith('ai:')]
             if not products: await q.message.reply_text('Товаров пока нет.'); return
             rows = [[b(('✅ ' if p['active'] else '⏸ ') + p['name'][:55],data='shop:adminproduct:'+p['id'])] for p in products[:100]]
             await q.message.reply_text('Выбери товар, чтобы включить или скрыть:',reply_markup=Markup(rows))
@@ -207,7 +207,7 @@ async def callback(update, context, store, admin_id):
     if action == 'catalog':
         category = data[2] if len(data)>2 else ''
         if category not in ('bots','scripts'): await q.answer(); return
-        products = store.products(category)
+        products = [p for p in store.products(category) if not p['file_id'].startswith('ai:')]
         await q.answer()
         if not products: await q.message.reply_text('В этом каталоге пока нет товаров.'); return
         rows = [[b(f"{p['name'][:40]} · {p['price_kopecks']/100:.2f} ₽",data='shop:product:'+p['id'])] for p in products[:100]]
@@ -253,7 +253,7 @@ async def callback(update, context, store, admin_id):
         return
     if action == 'product':
         product = store.product(data[2]) if len(data)>2 else None
-        if not product or not product['active']:
+        if not product or not product['active'] or product['category']=='ai' or product['file_id'].startswith('ai:'):
             await q.answer('Товар недоступен.',show_alert=True); return
         await q.answer()
         markup = Markup([[b('Crypto Bot',data='shop:buy:crypto:'+product['id'])],
@@ -263,7 +263,7 @@ async def callback(update, context, store, admin_id):
         if len(data)!=4 or data[2] not in ('crypto','sbp','card'):
             await q.answer('Неизвестный способ оплаты.',show_alert=True); return
         product=store.product(data[3])
-        if not product or not product['active']:
+        if not product or not product['active'] or product['category']=='ai' or product['file_id'].startswith('ai:'):
             await q.answer('Товар недоступен.',show_alert=True); return
         await q.answer('Создаём счёт…')
         order_id=secrets.token_hex(12)

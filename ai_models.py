@@ -1,5 +1,4 @@
 """Administrator configuration for future prepaid model products."""
-from decimal import Decimal, InvalidOperation
 from telegram import InlineKeyboardMarkup
 from cryptography.fernet import InvalidToken
 import support_ai
@@ -31,16 +30,13 @@ def save(store, bot_token, key, base, model, cipher, amount):
     if not token or len(token)>2048 or any(c.isspace() for c in token):raise ValueError('Некорректный токен.')
     store.db.execute('INSERT OR IGNORE INTO ai_model_settings(id,base_url,model_id,token_cipher,price_kopecks) VALUES(?,?,?,?,?)',(key,base,model,cipher,amount))
     store.db.execute('UPDATE ai_model_settings SET base_url=?,model_id=?,token_cipher=?,price_kopecks=? WHERE id=?',(base,model,cipher,amount,key))
-    product_id='ai_'+key
-    description='1 000 000 токенов для модели '+MODELS[key]+'. Текст и изображения при поддержке провайдера.'
-    store.db.execute('INSERT OR IGNORE INTO products(id,category,name,description,price_kopecks,file_id,filename,instruction,active) VALUES(?,?,?,?,?,?,?,?,1)',(product_id,'ai',MODELS[key],description,amount,'ai:'+key,'ai_tokens','Индивидуальный API ключ'))
-    store.db.execute('UPDATE products SET name=?,description=?,price_kopecks=? WHERE id=?',(MODELS[key],description,amount,product_id));store.db.commit()
+    store.db.commit()
 
 
 async def menu(update,context,store,admin_id):
     if update.effective_user.id!=admin_id or not update.effective_message or update.effective_message.chat.type!='private':return
     rows=[[shop.b(('✅ ' if config(store,k) else '⚙️ ')+name,data='aimodel:'+k)] for k,name in MODELS.items()]
-    await update.effective_message.reply_text('Настройки моделей ИИ. Выберите модель. Настройте модель и цену за 1 миллион токенов. Цену в Telegram Stars задайте отдельно командой /stars.',reply_markup=InlineKeyboardMarkup(rows))
+    await update.effective_message.reply_text('Настройки моделей ИИ. Выберите модель и настройте Base URL, ID модели и токен провайдера. Пользователи получают бесплатные токены в Mini App.',reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def choose(update,context,store,admin_id):
@@ -79,13 +75,9 @@ async def input(update,context,store,admin_id,bot_token):
             if text.lower().startswith('bearer '):text=text[7:].strip()
             if not text or len(text)>2048 or any(c.isspace() for c in text):await msg.reply_text('Нужен API Token без пробелов.');return True
             cipher=support_ai.crypt(bot_token).encrypt(text.encode()).decode()
-        draft.update(cipher=cipher,step='price');await msg.reply_text('Введите цену за 1 миллион токенов в рублях, например 299.50.');return True
-    if draft['step']=='price':
         try:
-            if len(text)>16:raise ValueError
-            value=Decimal(text.replace(',','.'))
-            if not value.is_finite() or not Decimal('0.01')<=value<=Decimal('1000000') or value*100!=(value*100).to_integral_value():raise ValueError
-            save(store,bot_token,draft['key'],draft['base'],draft['model'],draft['cipher'],int(value*100))
-        except (ValueError,InvalidOperation):await msg.reply_text('Некорректная цена или токен. Введите цену от 0,01 до 1 000 000 ₽. Если токен устарел, отправьте /cancel и начните заново.');return True
-        context.user_data.pop('ai_model_draft',None);await msg.reply_text('✅ Данные модели сохранены. Для оплаты Stars задайте цену командой /stars ai_'+draft['key']+' количество.');return True
+            save(store,bot_token,draft['key'],draft['base'],draft['model'],cipher,current['price_kopecks'] if current else 1)
+        except ValueError:
+            await msg.reply_text('Не удалось сохранить настройки. Проверьте токен и попробуйте снова.');return True
+        context.user_data.pop('ai_model_draft',None);await msg.reply_text('✅ Данные модели сохранены. Токены выдаются бесплатно в Mini App.');return True
     return False
