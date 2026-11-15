@@ -12,9 +12,11 @@ import sys
 from types import SimpleNamespace
 import ai_gateway
 import creator_agent
+import project_agent
 import ai_models
 from aiohttp import web
 import support_ai
+import aiohttp
 
 PROMPT = '''Ты помощник по созданию Lua-скриптов для проекта RakCRMP Black. Отвечай по-русски. Не выдумывай API: если не уверен в имени функции или данных игрового протокола, явно скажи об этом и попроси сведения. Скрипт рассчитан на существующий загрузчик с обработчиками on_load(e), on_spawn(e), on_chat(e), где текст чата находится в e.message. Доступны br.log(text), br.after(seconds, name, data), br.walk(x,y,z), br.drive(x,y,z), br.dialog(id,response,item,text), br.chat(text), br.setting(key,default). Изменения игровых действий должны проходить через API загрузчика. Не обещай работоспособность по результатам проверки синтаксиса. Не проси ключи и пароли.''' + '\n' + creator_agent.AGENT_PROTOCOL
 LOCKS=[asyncio.Lock() for _ in range(64)]
@@ -23,6 +25,10 @@ RUNS={}
 MAX_CODE=128*1024
 MODEL_ATTEMPTS=5
 MODEL_RETRY_DELAY=10
+
+
+class JobStopped(Exception):
+    pass
 
 
 class EmptyModelResponse(Exception):
@@ -52,7 +58,8 @@ def init(store):
     CREATE TABLE IF NOT EXISTS creator_files (owner_id BIGINT PRIMARY KEY, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL);
     CREATE TABLE IF NOT EXISTS creator_chats (chat_id TEXT PRIMARY KEY, owner_id BIGINT NOT NULL, title TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL);
     CREATE TABLE IF NOT EXISTS creator_chat_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, owner_id BIGINT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL);
-    CREATE TABLE IF NOT EXISTS creator_chat_files (chat_id TEXT NOT NULL, owner_id BIGINT NOT NULL, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(chat_id,owner_id));''')
+    CREATE TABLE IF NOT EXISTS creator_chat_files (chat_id TEXT NOT NULL, owner_id BIGINT NOT NULL, body TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL, PRIMARY KEY(chat_id,owner_id));
+    CREATE TABLE IF NOT EXISTS creator_projects (owner_id BIGINT NOT NULL, chat_id TEXT NOT NULL, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY(owner_id,chat_id));''')
     store.db.commit()
 
 
@@ -108,7 +115,18 @@ async def progress(request,authorize):
     if run and run.get('chat','legacy')!=chat:run=None
     requested=request.query.get('run','')
     if requested and (not run or run['id']!=requested):raise web.HTTPNotFound(text='Задание не найдено или уже устарело.')
-    return web.json_response({'id':run['id'] if run else None,'state':run['state'] if run else 'idle','events':list(run['events']) if run else [],'result':run.get('result') if run else None},headers={'Cache-Control':'no-store'})
+    return web.json_response({'id':run['id'] if run else None,'state':run['state'] if run else 'idle','events':list(run['events']) if run else [],'result':run.get('result') if run else None,'used':run.get('used',0) if run else 0,'budget':run.get('budget') if run else None,'stopping':run.get('stop_requested',False) if run else False},headers={'Cache-Control':'no-store'})
+
+
+async def stop(request,authorize):
+    uid=await authorize(request,require_subscription=False)
+    try:data=await request.json()
+    except (ValueError,TypeError):raise web.HTTPBadRequest(text='Некорректный запрос.')
+    chat=checked_chat(request.app['store'],uid,data.get('chat','legacy'))
+    run=RUNS.get(uid)
+    if not run or run.get('chat','legacy')!=chat or run['id']!=data.get('run_id') or run['state']!='running':raise web.HTTPNotFound(text='Активное задание не найдено.')
+    run['stop_requested']=True
+    return web.json_response({'ok':True,'message':'Останавливаю: текущий запрос завершится и будет учтён.'},headers={'Cache-Control':'no-store'})
 
 
 def extract_code(text):
@@ -140,7 +158,7 @@ async def check_syntax(code):
         return {'status':'ok' if proc.returncode==0 else 'error','message':'Синтаксис Lua 5.4 корректен. Поведение и игровые действия не проверены.' if proc.returncode==0 else detail or 'Ошибка синтаксиса Lua.'}
 
 
-async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,max_output=1024,retry_hint=False):
+async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,max_output=1024,retry_hint=False,reservation_limit=None,on_usage=None,system_prompt=None):
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите купленную модель.')
     row=store.db.execute('SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>0 AND in_flight=0 ORDER BY balance DESC,created_at DESC LIMIT 1',(uid,selected)).fetchone()
     if not row:raise web.HTTPPaymentRequired(text='Нет доступного оплаченного ключа для этой модели.')
@@ -165,11 +183,15 @@ async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,
     ordered=list(reversed(bounded))
     if reserve:ordered.insert(0,{'role':'user','content':anchor['body'][:reserve]})
     if retry_hint and len(ordered)<19:ordered.append({'role':'user','content':'Продолжи работу. Верни одно следующее действие в корректном JSON.'})
-    payload={'model':selected,'max_tokens':max_output,'messages':[{'role':'system','content':PROMPT}]+ordered}
+    payload={'model':selected,'max_tokens':max_output,'messages':[{'role':'system','content':system_prompt or PROMPT}]+ordered}
     async def get_json():return payload
     fake=SimpleNamespace(headers={'Authorization':'Bearer '+key},app={'store':store,'token':bot_token},json=get_json)
-    result=await ai_gateway.completions(fake,max_tokens_limit=4096)
-    value=json.loads(result.body);choices=value.get('choices') or []
+    kwargs={'max_tokens_limit':4096}
+    if reservation_limit is not None:kwargs['reservation_limit']=reservation_limit
+    result=await ai_gateway.completions(fake,**kwargs)
+    value=json.loads(result.body)
+    if on_usage is not None:on_usage(value.get('usage',{}).get('total_tokens',0))
+    choices=value.get('choices') or []
     text=(choices[0].get('message') or {}).get('content') if choices else None
     if not isinstance(text,str) or not text.strip():
         reason=choices[0].get('finish_reason','') if choices and isinstance(choices[0],dict) else ''
@@ -198,12 +220,25 @@ async def messages(request,authorize):
     if not isinstance(text,str) or not 1<=len(text.strip())<=4000:raise web.HTTPBadRequest(text='Введите сообщение длиной до 4000 символов.')
     chat=checked_chat(store,uid,data.get('chat','legacy'))
     selected=data.get('model','')
+    mode=data.get('mode','lua')
+    if mode not in ('lua','github'):raise web.HTTPBadRequest(text='Неизвестный режим работы.')
+    repo_url=data.get('repo','')
+    if mode=='github':
+        try:project_agent.repo_parts(repo_url)
+        except (ValueError,TypeError):raise web.HTTPBadRequest(text='Укажите публичную ссылку GitHub вида https://github.com/owner/repo')
+    budget=data.get('budget',50000)
+    if isinstance(budget,bool) or not isinstance(budget,int) or not 2000<=budget<=200000:raise web.HTTPBadRequest(text='Лимит задачи должен быть от 2000 до 200000 токенов.')
     if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель, для которой куплены токены.')
     async def generate(items):
         settings={'context_size':16000,'max_output':1024,'retry_hint':False}
         async def once():
+            if run['stop_requested']:raise JobStopped()
+            def record_usage(used):run['used']+=used
             async with support_ai.SLOTS:
-                return await paid_model(store,request.app['token'],uid,selected,items,**settings)
+                if run['stop_requested']:raise JobStopped()
+                value=await paid_model(store,request.app['token'],uid,selected,items,reservation_limit=max(0,budget-run['used']),on_usage=record_usage,system_prompt=project_agent.PROMPT if mode=='github' else None,**settings)
+            if run['stop_requested']:raise JobStopped()
+            return value
         def adapt(exc,attempt):
             settings['context_size']=max(6000,settings['context_size']//2)
             settings['retry_hint']=True
@@ -218,7 +253,7 @@ async def messages(request,authorize):
     for k,v in list(RUNS.items()):
         if v.get('state')!='running' and v.get('started',0)<now-3600:RUNS.pop(k,None)
     RATE[uid]=recent+[now]
-    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now,'sequence':0,'chat':chat};RUNS[uid]=run
+    run={'id':secrets.token_urlsafe(18),'state':'running','events':[],'started':now,'sequence':0,'chat':chat,'stop_requested':False,'used':0,'budget':budget};RUNS[uid]=run
     def emit(kind,message):
         run['sequence']+=1
         event={'id':run['id']+':'+str(run['sequence']),'kind':kind,'message':str(message)[:1200]}
@@ -233,15 +268,32 @@ async def messages(request,authorize):
                 add(store,uid,'user',text.strip(),chat);items=history(store,uid,16,include_events=False,chat=chat)
                 if chat!='legacy':
                     store.db.execute("UPDATE creator_chats SET title=? WHERE chat_id=? AND owner_id=? AND title=?",(text.strip()[:45],chat,uid,'Новый чат'));store.db.commit()
-                result=await creator_agent.run(generate,check_syntax,text.strip(),file_for(store,uid,chat),items[:-1],emit)
-                if result['changed']:
-                    save_file(store,uid,result['code'],chat)
-                answer=result['answer'];code=result['code'];check=result['check']
+                if mode=='github':
+                    previous=store.db.execute('SELECT repo,commit_sha,files FROM creator_projects WHERE owner_id=? AND chat_id=?',(uid,chat)).fetchone()
+                    result=await project_agent.run(generate,repo_url,text.strip(),items[:-1],emit,dict(previous) if previous else None)
+                    if run['stop_requested']:raise JobStopped()
+                    answer=result['answer'];code=None;check=None
+                    project={'archive':project_agent.archive(result),'files':list(result['files']),'commit':result['commit']} if result.get('files') else None
+                    if result.get('commit'):
+                        store.db.execute('INSERT INTO creator_projects(owner_id,chat_id,repo,commit_sha,files) VALUES(?,?,?,?,?) ON CONFLICT(owner_id,chat_id) DO UPDATE SET repo=excluded.repo,commit_sha=excluded.commit_sha,files=excluded.files',(uid,chat,repo_url,result['commit'],json.dumps(result.get('files',{}),ensure_ascii=False)));store.db.commit()
+                else:
+                    result=await creator_agent.run(generate,check_syntax,text.strip(),file_for(store,uid,chat),items[:-1],emit)
+                    if run['stop_requested']:raise JobStopped()
+                    if result['changed']:save_file(store,uid,result['code'],chat)
+                    answer=result['answer'];code=result['code'];check=result['check'];project=None
                 add(store,uid,'assistant',answer,chat)
+                if project:add(store,uid,'project',json.dumps(project,ensure_ascii=False),chat)
                 options=result.get('options') or []
                 if options:add(store,uid,'options',json.dumps(options,ensure_ascii=False),chat)
                 run['state']='done'
-                run['result']={'ok':True,'answer':answer,'code':code,'check':check,'options':options,'events':list(run['events'])}
+                run['result']={'ok':True,'answer':answer,'code':code,'check':check,'project':project,'options':options,'events':list(run['events']),'used':run['used'],'budget':budget}
+        except (aiohttp.ClientError,asyncio.TimeoutError,RuntimeError) as exc:
+            message='Не удалось получить данные от GitHub или другого сервиса. Проверьте доступность сети и репозитория.' if mode=='github' else 'Не удалось завершить запрос. Попробуйте ещё раз.'
+            add(store,uid,'notice',message,chat);emit('error',message);run['state']='failed'
+            run['result']={'ok':False,'message':message,'used':run['used'],'budget':budget}
+        except JobStopped:
+            emit('status','Задание остановлено. Уже завершённые запросы учтены; файл сохранён только после завершения задачи.')
+            run['state']='stopped';run['result']={'ok':False,'message':'Задание остановлено.','used':run['used'],'budget':budget}
         except asyncio.CancelledError:
             emit('error','Задание прервано; ранее сохранённый файл не изменён.');run['state']='failed'
             run['result']={'ok':False,'message':'Задание прервано.'}
@@ -249,11 +301,17 @@ async def messages(request,authorize):
         except web.HTTPException as exc:
             message=exc.text or 'Не удалось получить ответ ИИ.'
             add(store,uid,'notice',message,chat);emit('error',message);run['state']='failed'
-            run['result']={'ok':False,'message':message}
+            run['result']={'ok':False,'message':message,'used':run['used'],'budget':budget}
         except Exception:
             add(store,uid,'notice','Не удалось получить ответ ИИ. Попробуйте ещё раз.',chat)
             emit('error','Не удалось завершить задание. Проверьте историю перед повтором.');run['state']='failed'
-            run['result']={'ok':False,'message':'Не удалось получить ответ ИИ. Попробуйте ещё раз.'}
+            run['result']={'ok':False,'message':'Не удалось получить ответ ИИ. Попробуйте ещё раз.','used':run['used'],'budget':budget}
+        try:
+            balance_row=store.db.execute('SELECT balance FROM ai_keys WHERE buyer=? AND model_key=? AND in_flight=0 ORDER BY balance DESC LIMIT 1',(uid,selected)).fetchone()
+            remaining=balance_row['balance'] if balance_row else None
+        except Exception:remaining=None
+        emit('billing',f"Израсходовано: {run['used']} токенов"+(f'; баланс: {remaining}' if remaining is not None else '; баланс недоступен или ожидает сверки'))
+        if run.get('result'):run['result']['balance']=remaining
         return run.get('result')
     if data.get('background') is True:
         run['task']=asyncio.create_task(execute())

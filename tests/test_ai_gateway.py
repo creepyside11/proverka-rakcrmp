@@ -62,6 +62,14 @@ class AITests(unittest.IsolatedAsyncioTestCase):
   with patch.object(gateway,'upstream',AsyncMock()) as upstream:
    r=await self.client.post('/v1/chat/completions',headers=self.auth(),json={'model':'glm','messages':[{'role':'user','content':'hello'}]})
    self.assertEqual(r.status,409);upstream.assert_not_awaited()
+ async def test_internal_budget_blocks_before_provider_call(self):
+  async def get_json():return {'model':'glm','messages':[{'role':'user','content':'hello'}],'max_tokens':100}
+  request=NS(headers=self.auth(),app={'store':self.store,'token':TOKEN},json=get_json)
+  with patch.object(gateway,'upstream',AsyncMock()) as upstream:
+   with self.assertRaises(web.HTTPPaymentRequired):await gateway.completions(request,reservation_limit=100)
+   upstream.assert_not_awaited()
+  self.assertEqual(gateway.keys(self.store,TOKEN,42)[0]['balance'],1000000)
+
  async def test_photo_passed_and_streaming_rejected(self):
   import base64
   out=io.BytesIO();Image.new('RGB',(4,4)).save(out,format='PNG')
@@ -92,7 +100,7 @@ class CreatorPaidTests(unittest.IsolatedAsyncioTestCase):
   fake={'choices':[{'message':{'content':'```lua\nprint(1)\n```'}}],'usage':{'total_tokens':200}}
   with patch.object(gateway,'upstream',AsyncMock(return_value=fake)),patch.object(script_creator,'check_syntax',AsyncMock(return_value={'status':'ok','message':'syntax only'})):
    r=await client.post('/api/creator/messages',headers={'X-Telegram-Init-Data':sign(42)},json={'text':'Сделай Lua','model':'glm'})
-   self.assertEqual(r.status,200);self.assertTrue((await r.json())['ok']);self.assertEqual(gateway.keys(store,TOKEN,42)[0]['balance'],999800)
+   self.assertEqual(r.status,200);data=await r.json();self.assertTrue(data['ok']);self.assertEqual(data['used'],200);self.assertEqual(data['balance'],999800);self.assertEqual(gateway.keys(store,TOKEN,42)[0]['balance'],999800)
    r=await client.post('/api/creator/messages',headers={'X-Telegram-Init-Data':sign(43)},json={'text':'Сделай Lua','model':'glm'})
    data=await r.json();self.assertFalse(data['ok']);self.assertEqual(gateway.keys(store,TOKEN,42)[0]['balance'],999800)
   await client.close();store.db.close()

@@ -38,3 +38,14 @@ class ChatsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['options'],['Ферма','Шахта'])
         rows=(await (await self.client.get('/messages',headers={'uid':'42'},params={'chat':c['id']})).json())['messages']
         self.assertEqual(json.loads(next(x['body'] for x in rows if x['role']=='options')),['Ферма','Шахта'])
+
+    async def test_github_result_is_persisted_in_the_selected_chat(self):
+        c=await (await self.client.post('/chats',headers={'uid':'42'})).json()
+        result={'answer':'Готово','files':{'bot.py':'print(1)'},'commit':'a'*40,'repo':'https://github.com/example/repo'}
+        with patch.object(creator.project_agent,'run',AsyncMock(return_value=result)):
+            r=await self.client.post('/messages',headers={'uid':'42'},json={'chat':c['id'],'text':'улучши','model':'glm','mode':'github','repo':'https://github.com/example/repo'})
+            data=await r.json()
+        self.assertEqual(data['project']['files'],['bot.py'])
+        rows=(await (await self.client.get('/messages',headers={'uid':'42'},params={'chat':c['id']})).json())['messages']
+        self.assertTrue(any(x['role']=='project' for x in rows))
+        self.assertEqual(creator.file_for(self.store,42,c['id']),'')

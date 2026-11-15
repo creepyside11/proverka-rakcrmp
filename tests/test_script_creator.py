@@ -21,6 +21,8 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
         async def auth(request,require_subscription=False):return int(request.headers['uid'])
         async def handler(request):return await creator.messages(request,auth)
         async def progress(request):return await creator.progress(request,auth)
+        async def stop(request):return await creator.stop(request,auth)
+        app.router.add_post('/stop',stop)
         app.router.add_get('/progress',progress)
         app.router.add_get('/messages',handler);app.router.add_post('/messages',handler)
         self.client=TestClient(TestServer(app));await self.client.start_server();creator.RATE.clear();creator.RUNS.clear()
@@ -62,6 +64,20 @@ class CreatorTests(unittest.IsolatedAsyncioTestCase):
             gate.set();await asyncio.wait_for(creator.RUNS[42]['task'],3)
             result=await (await self.client.get('/progress',headers={'uid':'42'},params={'run':data['run_id']})).json()
             self.assertEqual(result['state'],'done');self.assertIn('событие',result['result']['answer'])
+
+    async def test_stop_waits_for_confirmed_usage_without_starting_another_call(self):
+        entered=asyncio.Event();release=asyncio.Event()
+        async def slow(*args,on_usage=None,**kwargs):
+            entered.set();await release.wait();on_usage(42)
+            return json.dumps({'action':'ask','message':'Вопрос?'})
+        with patch.object(creator,'paid_model',side_effect=slow) as model:
+            started=await (await self.client.post('/messages',headers={'uid':'42'},json={'text':'создай','model':'glm','background':True,'budget':50000})).json()
+            await entered.wait()
+            wrong=await self.client.post('/stop',headers={'uid':'43'},json={'run_id':started['run_id']});self.assertEqual(wrong.status,404)
+            stop=await self.client.post('/stop',headers={'uid':'42'},json={'run_id':started['run_id']});self.assertEqual(stop.status,200)
+            self.assertEqual(creator.RUNS[42]['state'],'running')
+            release.set();await asyncio.wait_for(creator.RUNS[42]['task'],3)
+            self.assertEqual(creator.RUNS[42]['state'],'stopped');self.assertEqual(creator.RUNS[42]['used'],42);self.assertEqual(model.await_count,1)
 
     async def test_corrects_failed_syntax_once(self):
         model=AsyncMock(side_effect=['```lua\nbroken\n```','```lua\nfixed\n```'])
