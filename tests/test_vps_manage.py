@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,10 @@ class ScriptTests(unittest.TestCase):
         self.assertNotIn('caddy',vps_manage.command_script('stop_panel'))
         self.assertIn('disable --now rakcrmp-panel.service',vps_manage.command_script('stop_panel'))
         self.assertIn('disable --now rakcrmp-black.service',vps_manage.command_script('stop_bot'))
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is unavailable')
+    def test_confirmation_in_miniapp(self):
+        subprocess.run(['node','tests/test_vps_update_confirm.js'],check=True,capture_output=True,text=True,timeout=10)
 
     def test_update_preserves_accounts_and_rolls_back_failure(self):
         for scenario in ('success', 'pip_failure', 'account_conflict', 'stopped'):
@@ -41,7 +46,7 @@ class ScriptTests(unittest.TestCase):
                 if scenario!='stopped':active.write_text('1')
                 def stub(name,body):
                     p=bins/name;p.write_text('#!/bin/sh\n'+body+'\n');p.chmod(0o755)
-                stub('id','echo 0');stub('runuser','shift 3; exec "$@"');stub('sleep','exit 0')
+                stub('id','echo 0');stub('runuser','shift 3; exec "$@"');stub('sleep','exit 0');stub('lua5.4','exit 0')
                 stub('systemctl','case "$1" in is-active) test -e "$ACTIVE_FILE";; stop) rm -f "$ACTIVE_FILE";; start) touch "$ACTIVE_FILE";; *) exit 1;; esac')
                 script=vps_manage.UPDATE_SCRIPT.replace('/opt/rakcrmp-black-runtime',str(runtime)).replace('/opt/rakcrmp-black',str(app)).replace('/etc/rakcrmp-black',str(config)).replace('/etc/systemd/system',str(units)).replace('https://github.com/creepyside11/black.git',str(up))
                 env=os.environ.copy();env.update(PATH=str(bins)+':'+env['PATH'],ACTIVE_FILE=str(active),PIP_FAIL='1' if pip_failure else '0')
@@ -51,6 +56,50 @@ class ScriptTests(unittest.TestCase):
                 self.assertEqual((app/'accounts.json').read_text(),'{"accounts": ["my-account"]}')
                 self.assertEqual(active.exists(),scenario!='stopped')
                 self.assertEqual((app/'.venv/bin/marker').read_text(),'original' if scenario in ('pip_failure','account_conflict') else 'changed')
+
+class ConfirmedAccountUpdateTests(unittest.TestCase):
+    def test_confirmation_backup_and_rollback(self):
+        for case in ('accept','deny','pip_fail','start_fail','symlink','remove','other_change'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as dirname:
+                t=Path(dirname);up=t/'upstream';up.mkdir();app=t/'app';runtime=t/'runtime';runtime.mkdir();config=t/'config';config.mkdir();units=t/'units';units.mkdir();bins=t/'bin';bins.mkdir()
+                def run(*args,cwd=None):
+                    return subprocess.run(args,cwd=cwd,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True).stdout.strip()
+                run('git','init','-q','-b','main',str(up));run('git','config','user.email','test@example.invalid',cwd=up);run('git','config','user.name','Test',cwd=up)
+                (up/'accounts.json').write_text('upstream-old');(up/'bot.py').write_text('old');(up/'requirements.txt').write_text('')
+                run('git','add','.',cwd=up);run('git','commit','-qm','old',cwd=up);old=run('git','rev-parse','HEAD',cwd=up)
+                run('git','clone','-q',str(up),str(app));(app/'accounts.json').write_text('my-live-accounts')
+                (up/'bot.py').write_text('new')
+                if case=='remove':(up/'accounts.json').unlink()
+                else:(up/'accounts.json').write_text('upstream-new')
+                run('git','add','-A',cwd=up);run('git','commit','-qm','new',cwd=up);new=run('git','rev-parse','HEAD',cwd=up)
+                if case=='symlink':
+                    (app/'accounts.json').unlink();(t/'target').write_text('untouched');(app/'accounts.json').symlink_to(t/'target')
+                if case=='other_change':(app/'bot.py').write_text('my-code')
+                (app/'.venv/bin').mkdir(parents=True)
+                python=app/'.venv/bin/python';python.write_text('#!/bin/sh\n[ "${PIP_FAIL:-0}" != 1 ]\n');python.chmod(0o755)
+                (units/'rakcrmp-black.service').write_text('test');active=t/'active';active.write_text('1')
+                def stub(name,body):
+                    p=bins/name;p.write_text('#!/bin/sh\n'+body+'\n');p.chmod(0o755)
+                stub('id','echo 0');stub('runuser','shift 3; exec "$@"');stub('sleep','exit 0');stub('lua5.4','exit 0')
+                stub('systemctl','case "$1" in is-active) test -e "$ACTIVE_FILE";; stop) rm -f "$ACTIVE_FILE";; start) if [ -e "$START_FAIL_FILE" ]; then rm -f "$START_FAIL_FILE"; echo new-version-write > "$APP_DIR/accounts.json"; else touch "$ACTIVE_FILE"; fi;; *) exit 1;; esac')
+                fail_once=t/'fail-once'
+                if case=='start_fail':fail_once.write_text('1')
+                script=vps_manage.command_script('update_bot',replace_accounts=case!='deny').replace('/opt/rakcrmp-black-runtime',str(runtime)).replace('/opt/rakcrmp-black',str(app)).replace('/etc/rakcrmp-black',str(config)).replace('/etc/systemd/system',str(units)).replace('https://github.com/creepyside11/black.git',str(up))
+                env=os.environ.copy();env.update(PATH=str(bins)+':'+env['PATH'],ACTIVE_FILE=str(active),START_FAIL_FILE=str(fail_once),APP_DIR=str(app),PIP_FAIL='1' if case=='pip_fail' else '0')
+                result=subprocess.run(['bash'],input=script,text=True,capture_output=True,env=env,timeout=30)
+                expected={'accept':0,'deny':40,'pip_fail':37,'start_fail':38,'symlink':41,'remove':0,'other_change':33}[case]
+                self.assertEqual(result.returncode,expected,result.stderr)
+                self.assertEqual(run('git','rev-parse','HEAD',cwd=app),new if case in ('accept','remove') else old)
+                self.assertTrue(active.exists())
+                if case=='remove':self.assertFalse((app/'accounts.json').exists())
+                elif case=='accept':self.assertEqual((app/'accounts.json').read_text(),'upstream-new')
+                elif case=='symlink':self.assertEqual((t/'target').read_text(),'untouched');self.assertTrue((app/'accounts.json').is_symlink())
+                else:self.assertEqual((app/'accounts.json').read_text(),'my-live-accounts')
+                backups=list((config/'account-backups').glob('update.*/accounts.json'))
+                if case in ('accept','remove','pip_fail','start_fail'):
+                    self.assertEqual(len(backups),1);self.assertEqual(backups[0].read_text(),'my-live-accounts');self.assertEqual(backups[0].stat().st_mode & 0o077,0)
+                else:self.assertFalse(backups)
+                if case=='start_fail':self.assertEqual((backups[0].parent/'after-failure.json').read_text(),'new-version-write\n')
 
 class EndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -98,6 +147,15 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         result=await (await self.client.get('/status',params={'job':job})).json()
         self.assertEqual(result['state'],'done');self.assertNotIn('private-pass',str(result));self.assertNotIn('private-pass',self.scripts[0]);self.assertIn('disable --now rakcrmp-black.service',self.scripts[0])
         r=await self.client.get('/status',params={'job':job},headers={'uid':'43'});self.assertEqual(r.status,404)
+    async def test_replace_accounts_requires_explicit_boolean(self):
+        import asyncio
+        data={'probe_id':'test','username':'root','password':'private-pass','confirmed':True,'action':'update_bot'}
+        for value in ('true', 1, None):
+            r=await self.client.post('/start',json={**data,'replace_accounts':value});self.assertEqual(r.status,400)
+        r=await self.client.post('/start',json={**data,'replace_accounts':True});self.assertEqual(r.status,200)
+        await asyncio.wait_for(self.tasks[0],10)
+        self.assertIn('allow_replace=1 # confirmation marker',self.scripts[0]);self.assertNotIn('private-pass',self.scripts[0])
+
     async def test_setup_bridge_requests_fixed_script(self):
         import asyncio
         data={'probe_id':'test','username':'root','password':'private-pass','confirmed':True,'action':'setup_bridge'}

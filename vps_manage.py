@@ -17,9 +17,9 @@ ACTIONS = {
 }
 
 
-def command_script(action):
+def command_script(action, replace_accounts=False):
     if action == 'update_bot':
-        return UPDATE_SCRIPT
+        return UPDATE_SCRIPT.replace('allow_replace=0 # confirmation marker', 'allow_replace=1 # confirmation marker' if replace_accounts else 'allow_replace=0 # confirmation marker')
     if action == 'setup_bridge':
         return vps_singbox.BRIDGE_SCRIPT
     unit, operation, _ = ACTIONS[action]
@@ -35,10 +35,8 @@ systemctl {operation} {unit} >/dev/null 2>&1 || exit 25
 '''
 
 
-# Only tracked source files are updated; user data is never force-reset.
-# A changed accounts.json is explicitly permitted and Git will refuse checkout
-# if a newer revision would overwrite it. Untracked/ignored files get the same
-# protection using --no-overwrite-ignore.
+# Other local files are never force-reset. An account file is replaced only
+# after explicit confirmation and a private, retained backup has been created.
 UPDATE_SCRIPT = r'''set -eu
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=l
@@ -55,7 +53,14 @@ asowner git fetch -q --depth=100 https://github.com/creepyside11/black.git refs/
 new=$(asowner git rev-parse --verify FETCH_HEAD) || exit 31
 [ "$new" != "$old" ] || exit 10
 asowner git merge-base --is-ancestor "$old" "$new" || exit 32
-asowner git diff --quiet "$old" "$new" -- accounts.json || exit 40
+allow_replace=0 # confirmation marker
+accounts_changed=0
+if asowner git diff --quiet "$old" "$new" -- accounts.json; then :; else
+    diff_code=$?
+    [ "$diff_code" -eq 1 ] || exit 30
+    accounts_changed=1
+fi
+if [ "$accounts_changed" -eq 1 ] && [ "$allow_replace" -ne 1 ]; then exit 40; fi
 asowner git diff --quiet HEAD -- . ':(exclude)accounts.json' || exit 33
 [ -d /opt/rakcrmp-black-runtime ] || exit 22
 backup=$(mktemp -d /opt/rakcrmp-black-runtime/update-backup.XXXXXXXX) || exit 34
@@ -65,10 +70,34 @@ if systemctl is-active --quiet rakcrmp-black.service; then
     was_active=1
     if ! systemctl stop rakcrmp-black.service >/dev/null 2>&1; then rm -rf -- "$backup"; exit 35; fi
 fi
+account_backup=''
+account_existed=0
+account_touched=0
 restore() {
     code=$1
-    # Do not discard any runtime data or force checkout over local changes.
+    # Preserve any account changes made by a briefly restarted new version,
+    # then reset only that path so checkout of the old revision can proceed.
+    if [ "$account_touched" = 1 ]; then
+        if [ -L "$root/accounts.json" ] || { [ -e "$root/accounts.json" ] && [ ! -f "$root/accounts.json" ]; }; then exit 39; fi
+        if [ -f "$root/accounts.json" ]; then
+            cp -a -- "$root/accounts.json" "$account_backup/after-failure.json" || exit 39
+            chmod 0600 "$account_backup/after-failure.json" || exit 39
+        fi
+        current=$(asowner git rev-parse --verify HEAD) || exit 39
+        if asowner git cat-file -e "$current:accounts.json" 2>/dev/null; then
+            asowner git checkout -q --force "$current" -- accounts.json || exit 39
+        else
+            asowner rm -f -- "$root/accounts.json" || exit 39
+        fi
+    fi
     if ! asowner git checkout -q --detach --no-overwrite-ignore "$old"; then exit 39; fi
+    if [ "$account_touched" = 1 ]; then
+        if [ "$account_existed" = 1 ]; then
+            cp -a -- "$account_backup/accounts.json" "$root/accounts.json" || exit 39
+        else
+            asowner rm -f -- "$root/accounts.json" || exit 39
+        fi
+    fi
     if [ -d "$backup/venv" ]; then
         if [ -d "$root/.venv" ]; then mv "$root/.venv" "$backup/venv-failed" || exit 39; fi
         mv "$backup/venv" "$root/.venv" || exit 39
@@ -79,7 +108,32 @@ restore() {
 }
 trap 'restore 38' HUP INT TERM
 asowner git diff --quiet HEAD -- . ':(exclude)accounts.json' || restore 33
+if [ "$accounts_changed" = 1 ]; then
+    # Never follow an account-file symlink or overwrite a directory.
+    if [ -L "$root/accounts.json" ] || { [ -e "$root/accounts.json" ] && [ ! -f "$root/accounts.json" ]; }; then restore 41; fi
+    if [ -L /etc/rakcrmp-black/account-backups ] || { [ -e /etc/rakcrmp-black/account-backups ] && [ ! -d /etc/rakcrmp-black/account-backups ]; }; then restore 34; fi
+    install -d -m 0700 /etc/rakcrmp-black/account-backups || restore 34
+    account_backup=$(mktemp -d /etc/rakcrmp-black/account-backups/update.XXXXXXXX) || restore 34
+    chmod 0700 "$account_backup" || restore 34
+    if [ -f "$root/accounts.json" ]; then
+        account_existed=1
+        cp -a -- "$root/accounts.json" "$account_backup/accounts.json" || restore 34
+        chmod 0600 "$account_backup/accounts.json" || restore 34
+    fi
+    # The service is stopped, so the backup corresponds to its last saved state.
+    account_touched=1
+    if asowner git cat-file -e "$old:accounts.json" 2>/dev/null; then
+        asowner git checkout -q --force "$old" -- accounts.json || restore 36
+    else
+        asowner rm -f -- "$root/accounts.json" || restore 36
+    fi
+fi
 asowner git checkout -q --detach --no-overwrite-ignore "$new" || restore 36
+if ! command -v lua5.4 >/dev/null 2>&1; then
+    apt-get update -qq >/dev/null 2>&1 || restore 42
+    apt-get install -y -qq lua5.4 >/dev/null 2>&1 || restore 42
+fi
+command -v lua5.4 >/dev/null 2>&1 || restore 42
 asowner "$root/.venv/bin/python" -m pip install --disable-pip-version-check -q -r "$root/requirements.txt" >/dev/null 2>&1 || restore 37
 asowner "$root/.venv/bin/python" -m pip check >/dev/null 2>&1 || restore 37
 if [ "$was_active" = 1 ]; then
@@ -106,7 +160,10 @@ async def start(request, authorize):
         raise web.HTTPBadRequest(text='Проверка ключа устарела. Начните заново.')
     if uid in vi.ACTIVE: raise web.HTTPConflict(text='Другая операция уже выполняется.')
     if len(vi.ACTIVE)>=3: raise web.HTTPServiceUnavailable(text='Все подключения заняты. Попробуйте позже.')
-    script=command_script(action)
+    replace_accounts=data.get('replace_accounts',False)
+    if not isinstance(replace_accounts,bool) or (replace_accounts and action!='update_bot'):
+        raise web.HTTPBadRequest(text='Некорректное подтверждение замены файла.')
+    script=command_script(action,replace_accounts=replace_accounts)
     vi.PROBES.pop(probe_id,None);vi.ACTIVE.add(uid)
     jid=secrets.token_urlsafe(24)
     vi.JOBS[jid]={'uid':uid,'state':'running','message':'Подключаемся к VPS и выполняем действие.','finished':None}
@@ -121,7 +178,7 @@ async def start(request, authorize):
                     if action=='update_bot': vi.JOBS[jid]['message']='Проверяем обновление и сохраняем резервную копию окружения.'
                     elif action=='setup_bridge': vi.JOBS[jid]['message']='Устанавливаем и проверяем sing-box и локальный SOCKS5-мост.'
                     result=await conn.run('/bin/bash -s' if root else 'sudo -n /bin/bash -s',input=script,timeout=900)
-                    messages={21:'Нужны права администратора VPS.',22:'Установка программы на VPS не найдена.',23:'Служба не найдена. Сначала установите программу или запустите Mini App.',24:'На этом VPS уже выполняется другая операция.',25:'Служба не выполнила команду.',26:'Служба не запустилась или сразу остановилась.',30:'Не удалось определить установленную версию.',31:'Не удалось получить обновление с GitHub.',32:'Новая версия не является продолжением установленной. Автоматическое обновление остановлено.',33:'В файлах программы обнаружены локальные изменения. Обновление остановлено, чтобы не потерять данные.',34:'Не удалось создать резервную копию окружения. Программа не изменена.',35:'Не удалось остановить программу для обновления.',36:'Обновление конфликтует с локальными файлами. Предыдущая версия восстановлена.',37:'Не удалось установить зависимости. Предыдущая версия восстановлена.',38:'Обновлённая программа не запустилась. Предыдущая версия восстановлена.',39:'Не удалось автоматически восстановить предыдущую версию; проверьте VPS и резервную копию.',40:'В новой версии изменён файл аккаунтов. Обновление остановлено, чтобы сохранить ваши данные.',43:'Путь sing-box в конфигурации отличается от установочного. Существующие настройки не изменены.',44:'Архитектура VPS не поддерживается.',45:'Не удалось скачать или проверить sing-box. Существующий бинарник не изменён.',46:'Тестовый SOCKS5-мост не запустился. Существующий бинарник и настройки не изменены.',47:'Не удалось установить новый sing-box.'}
+                    messages={21:'Нужны права администратора VPS.',22:'Установка программы на VPS не найдена.',23:'Служба не найдена. Сначала установите программу или запустите Mini App.',24:'На этом VPS уже выполняется другая операция.',25:'Служба не выполнила команду.',26:'Служба не запустилась или сразу остановилась.',30:'Не удалось определить установленную версию.',31:'Не удалось получить обновление с GitHub.',32:'Новая версия не является продолжением установленной. Автоматическое обновление остановлено.',33:'В файлах программы обнаружены локальные изменения. Обновление остановлено, чтобы не потерять данные.',34:'Не удалось создать резервную копию окружения. Программа не изменена.',35:'Не удалось остановить программу для обновления.',36:'Обновление конфликтует с локальными файлами. Предыдущая версия восстановлена.',37:'Не удалось установить зависимости. Предыдущая версия восстановлена.',38:'Обновлённая программа не запустилась. Предыдущая версия восстановлена.',39:'Не удалось автоматически восстановить предыдущую версию; проверьте VPS и резервную копию.',40:'Для замены файла аккаунтов требуется отдельное подтверждение. Никакие данные не изменены.',41:'Файл аккаунтов является ссылкой или не обычным файлом. Обновление отменено.',42:'Не удалось установить Lua 5.4. Предыдущая версия и аккаунты восстановлены.',43:'Путь sing-box в конфигурации отличается от установочного. Существующие настройки не изменены.',44:'Архитектура VPS не поддерживается.',45:'Не удалось скачать или проверить sing-box. Существующий бинарник не изменён.',46:'Тестовый SOCKS5-мост не запустился. Существующий бинарник и настройки не изменены.',47:'Не удалось установить новый sing-box.'}
                     if action=='update_bot' and result.exit_status==10:
                         vi.JOBS[jid].update(state='done',message='Программа уже обновлена до последней версии.')
                     elif action=='setup_bridge' and result.exit_status in (12,13,14):
@@ -130,7 +187,7 @@ async def start(request, authorize):
                     elif result.exit_status!=0:
                         vi.JOBS[jid].update(state='failed',message=messages.get(result.exit_status,'Не удалось выполнить действие на VPS.'))
                     else:
-                        text=('Программа обновлена; данные сохранены. Если она была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box установлен и проверен; программе отправлен запрос на проверку сохранённых VPN-узлов. Добавьте подписку, если её ещё нет.' if action=='setup_bridge' else ACTIONS[action][2])
+                        text=('Программа обновлена. Если файл аккаунтов был заменён, резервная копия сохранена на VPS в /etc/rakcrmp-black/account-backups/. Если программа была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box установлен и проверен; программе отправлен запрос на проверку сохранённых VPN-узлов. Добавьте подписку, если её ещё нет.' if action=='setup_bridge' else ACTIONS[action][2])
                         vi.JOBS[jid].update(state='done',message=text)
         except asyncssh.HostKeyNotVerifiable:
             vi.JOBS[jid].update(state='failed',message='SSH-ключ изменился. Подключение остановлено.')

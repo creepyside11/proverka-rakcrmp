@@ -14,7 +14,8 @@ from aiohttp import web
 # Avoid routine SSH connection logs containing customer VPS addresses/usernames.
 logging.getLogger('asyncssh').setLevel(logging.WARNING)
 
-PINNED_COMMIT = 'ad324c9eeb6a0022aed4ac31203c04b670d324fc'
+# Fetch the current main at installation time, then detach at the fetched commit.
+INSTALL_REF = 'refs/heads/main'
 PROBES = {}
 JOBS = {}
 ACTIVE = set()
@@ -117,7 +118,7 @@ case "$(uname -m)" in
   *) exit 29 ;;
 esac
 apt-get update -qq >/dev/null 2>&1 || exit 27
-apt-get install -y -qq git python3 python3-venv curl ca-certificates >/dev/null 2>&1 || exit 27
+apt-get install -y -qq git python3 python3-venv lua5.4 curl ca-certificates >/dev/null 2>&1 || exit 27
 python3 -c 'import sys; assert sys.version_info >= (3,10)' || exit 25
 tmp_dir=$(mktemp -d)
 trap 'rm -rf -- "$tmp_dir"' EXIT
@@ -133,7 +134,7 @@ mkdir /opt/rakcrmp-black
 cd /opt/rakcrmp-black
 git init -q
 git remote add origin https://github.com/creepyside11/black.git
-git fetch -q --depth 1 origin '''+PINNED_COMMIT+'''
+git fetch -q --depth 1 origin '''+INSTALL_REF+'''
 git checkout -q --detach FETCH_HEAD
 python3 -m venv /opt/rakcrmp-black/.venv || exit 30
 /opt/rakcrmp-black/.venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt >/dev/null 2>&1 || exit 30
@@ -141,7 +142,7 @@ python3 -m venv /opt/rakcrmp-black/.venv || exit 30
 install -d -m 0755 /opt/rakcrmp-black-runtime
 install -m 0755 "$tmp_dir/sing-box" /opt/rakcrmp-black-runtime/sing-box
 chown -R rakcrmp-black:rakcrmp-black /opt/rakcrmp-black
-runuser -u rakcrmp-black -- env SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box /opt/rakcrmp-black/.venv/bin/python -c 'import telebot, requests; from logic.vpn_bridge import bridge_available; assert bridge_available()' || exit 30
+runuser -u rakcrmp-black -- env SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box /opt/rakcrmp-black/.venv/bin/python -c 'import telebot, requests, openai, shutil; import logic.lua_runtime; from logic.vpn_bridge import bridge_available; assert bridge_available() and shutil.which("lua5.4")' || exit 30
 install -d -m 0700 /etc/rakcrmp-black
 printf '%s\\n' '''+shlex.quote('TG_BOT_TOKEN='+token)+''' '''+shlex.quote('TG_ADMIN_ID='+admin)+''' 'SING_BOX_BIN=/opt/rakcrmp-black-runtime/sing-box' > /etc/rakcrmp-black/bot.env
 chmod 0600 /etc/rakcrmp-black/bot.env

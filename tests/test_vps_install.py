@@ -49,7 +49,7 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.tasks[0],10)
         r=await self.client.get('/status',params={'job':job});body=await r.json();self.assertEqual(body['state'],'done')
         self.assertNotIn('MySecretPassword',str(body));self.assertNotIn(TOKEN,str(body))
-        self.assertEqual(len(self.scripts),1);self.assertIn(v.PINNED_COMMIT,self.scripts[0]);self.assertIn('TG_BOT_TOKEN=',self.scripts[0]);self.assertNotIn('MySecretPassword',self.scripts[0])
+        self.assertEqual(len(self.scripts),1);self.assertIn('git fetch -q --depth 1 origin refs/heads/main',self.scripts[0]);self.assertIn('lua5.4',self.scripts[0]);self.assertIn('TG_BOT_TOKEN=',self.scripts[0]);self.assertNotIn('MySecretPassword',self.scripts[0])
         script=self.scripts[0]
         self.assertEqual(subprocess.run(['bash','-n'],input=script,text=True,capture_output=True).returncode,0)
         for part in ('python3-venv', 'pip install', '-r requirements.txt', 'import telebot, requests',
@@ -97,3 +97,33 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(v.public_ip('8.8.8.8'),'8.8.8.8')
         with self.assertRaises(ValueError): v.validate({'username':'root;echo','password':'p','bot_token':TOKEN,'admin_id':'123','confirmed':True,'os':'ubuntu-26.04'})
         self.p1.start()
+
+
+class InstallationScriptSimulation(unittest.TestCase):
+    def test_clean_install_fetches_current_main_and_sets_up_lua(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        import vps_install as vi
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);app=root/'app';runtime=root/'runtime';config=root/'config';units=root/'units';bins=root/'bin';bins.mkdir();units.mkdir();systemd=root/'systemd';systemd.mkdir();osrelease=root/'os-release';osrelease.write_text('ID=ubuntu\nVERSION_ID=26.04\n');calls=root/'calls'
+            def stub(name,body):
+                file=bins/name;file.write_text('#!/bin/sh\n'+body+'\n');file.chmod(0o755)
+            stub('id','[ "$1" = "-u" ] && { echo 0; exit 0; }; exit 1')
+            stub('systemctl','[ "$1" = "cat" ] && exit 1; exit 0')
+            stub('apt-get','echo "apt-get $*" >> "$TEST_CALLS"; exit 0')
+            stub('git','echo "git $*" >> "$TEST_CALLS"; exit 0')
+            stub('useradd','exit 0');stub('chown','exit 0');stub('sleep','exit 0')
+            stub('runuser','shift 3; exec "$@"')
+            stub('curl','while [ "$#" -gt 0 ]; do if [ "$1" = "-o" ]; then shift; : > "$1"; exit 0; fi; shift; done; exit 1')
+            stub('sha256sum','exit 0')
+            stub('tar','printf "#!/bin/sh\\nexit 0\\n"')
+            stub('python3','if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then mkdir -p "$3/bin"; printf "#!/bin/sh\\nexit 0\\n" > "$3/bin/python"; chmod +x "$3/bin/python"; fi; exit 0')
+            script=vi.installation_script('123456:ExampleTokenForTesting','42').replace('/opt/rakcrmp-black-runtime',str(runtime)).replace('/opt/rakcrmp-black',str(app)).replace('/etc/rakcrmp-black',str(config)).replace('/etc/systemd/system',str(units)).replace('/run/systemd/system',str(systemd)).replace('/etc/os-release',str(osrelease))
+            env=os.environ.copy();env.update(PATH=str(bins)+':'+env['PATH'],TEST_CALLS=str(calls))
+            import subprocess
+            result=subprocess.run(['bash'],input=script,text=True,capture_output=True,env=env,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            log=calls.read_text();self.assertIn('git fetch -q --depth 1 origin refs/heads/main',log);self.assertIn('lua5.4',log)
+            self.assertTrue((units/'rakcrmp-black.service').is_file());self.assertTrue((config/'bot.env').is_file())
+            self.assertNotIn('ad324c9',log)
