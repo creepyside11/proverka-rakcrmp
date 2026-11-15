@@ -15,17 +15,17 @@ const html=fs.readFileSync('miniapp.html','utf8');let ids={};for(const m of html
 const document={body:new Element('body'),getElementById(id){return ids[id]},querySelectorAll(){return []},createElement(tag){return new Element(tag)},createDocumentFragment(){return new Element('#fragment')},createTextNode(t){let x=new Element('#text');x.textContent=t;return x}};
 const formatter=require('../support_render.js');const tg={ready(){},expand(){},initData:'signed'},window={Telegram:{WebApp:tg},RakSupportFormatter:formatter,scrollTo(){},matchMedia(){return {matches:false}}};
 
-let freeCalls=0,keyCalls=0;
+let freeCalls=0,claims=[];
 const response=(obj,status=200)=>({ok:status>=200&&status<300,status,json:async()=>obj,text:async()=>typeof obj==='string'?obj:JSON.stringify(obj)});
 async function fetch(url,opts={}){
  if(url==='/api/catalog')return response({products:[]});
  if(url==='/api/ai/free'){
+  if(opts.method==='POST'){const model=JSON.parse(opts.body).model;claims.push(model);return model==='bad'?response('Ошибка начисления',500):response({})}
   freeCalls++;
   if(freeCalls===1)return response('500 Internal Server Error\nServer got itself in trouble',500);
   if(freeCalls===2)return response('Подпишитесь на обязательные каналы',403);
-  return response({models:[{model:'glm',name:'GLM 5.3',amount:4000000,balance:0,next_claim_at:0,pending:false,configured:true}]});
+  return response({models:[{model:'glm',name:'GLM 5.3',amount:4000000,balance:0,next_claim_at:0,pending:false,configured:true},{model:'bad',name:'Ошибка',amount:2000000,balance:0,next_claim_at:0,pending:false,configured:true},{model:'waiting',name:'Ожидание',amount:2000000,balance:0,next_claim_at:Math.floor(Date.now()/1000)+3600,pending:false,configured:true}]});
  }
- if(url==='/api/ai/keys'){keyCalls++;return keyCalls===1?response('500 Internal Server Error\nServer got itself in trouble',500):response({keys:[]})}
  return response({});
 }
 const context={document,window,fetch,location:{search:'',href:''},URL,URLSearchParams,Intl,console,setTimeout,clearTimeout,setInterval:()=>1,clearInterval,Map,Array,JSON,Promise};
@@ -37,8 +37,10 @@ const source=html.slice(html.lastIndexOf('<script>')+8,html.lastIndexOf('</scrip
  assert(ids['free-models'].textContent.includes('Подпишитесь на обязательные каналы'));
  retry=ids['free-models'].querySelector('.free-claim');assert(retry);await retry.onclick();
  assert(ids['free-models'].textContent.includes('GLM 5.3'));assert(ids['free-models'].textContent.includes('Получить'));
- await ids['ai-keys-load'].onclick();assert(ids['ai-keys-list'].textContent.includes('Не удалось загрузить ключи'));
- retry=ids['ai-keys-list'].querySelector('.install-back');assert(retry);await retry.onclick();
- assert(ids['ai-keys-list'].textContent.includes('У вас пока нет ключей'));
- console.log('free tokens and paid keys retries OK');
+ assert.equal(ids['free-models'].querySelectorAll('.free-claim').length,1);
+ await ids['free-models'].querySelector('.free-claim').onclick();
+ assert.deepStrictEqual(claims,['glm','bad']);
+ assert(ids['free-status'].textContent.includes('Начислено: GLM 5.3'));
+ assert(ids['free-status'].textContent.includes('Не удалось начислить: Ошибка'));
+ console.log('free tokens retry, combined claim, cooldown and partial failure OK');
 })().catch(e=>{console.error(e);process.exitCode=1});
