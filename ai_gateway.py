@@ -121,7 +121,7 @@ def settle(store,usage_id,used):
     return True
 
 
-async def completions(request, *, max_tokens_limit=1024):
+async def completions(request, *, max_tokens_limit=1024, reservation_limit=None):
     auth=request.headers.get('Authorization','')
     if not auth.startswith('Bearer ') or not re.fullmatch(r'rak-[0-9a-f]{64}',auth[7:]):raise web.HTTPUnauthorized(text='Invalid API key')
     store=request.app['store'];row=store.db.execute('SELECT * FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
@@ -129,6 +129,7 @@ async def completions(request, *, max_tokens_limit=1024):
     row=dict(row)
     try:data=await request.json();messages,maximum,reservation=_validate(data,max_tokens_limit=max_tokens_limit)
     except (ValueError,TypeError):raise web.HTTPBadRequest(text='Некорректный запрос: проверьте messages, изображение и max_tokens.')
+    if reservation_limit is not None and reservation>reservation_limit:raise web.HTTPPaymentRequired(text='Лимита задачи недостаточно для следующего запроса.')
     if data.get('model')!=row['model_key']:raise web.HTTPBadRequest(text='Ключ привязан к другой модели.')
     cfg=ai_models.config(store,row['model_key'])
     if not cfg:raise web.HTTPServiceUnavailable(text='Модель не настроена.')

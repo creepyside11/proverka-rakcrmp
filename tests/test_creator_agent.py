@@ -29,6 +29,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         result=await creator_agent.run(model,check,'создай','',[],lambda *x:None)
         self.assertEqual(result['code'],'print(1)');check.assert_awaited_once_with('print(1)')
 
+    async def test_duckduckgo_search_available_in_lua_mode(self):
+        model=AsyncMock(side_effect=[action('search',query='Lua 5.4 manual'),action('ask',message='Уточните задачу')])
+        with patch('project_agent.search_web',AsyncMock(return_value='Поисковый результат')) as search:
+            result=await creator_agent.run(model,AsyncMock(),'задача','',[],lambda *x:None)
+        self.assertEqual(result['answer'],'Уточните задачу');search.assert_awaited_once()
+        self.assertTrue(any('Поисковый результат' in m['body'] for m in model.await_args.args[0]))
+
     async def test_reference_access_is_limited_to_project_examples(self):
         model=AsyncMock(side_effect=[action('plan',steps=['Проверить API']),action('read_reference',name='../../.env'),action('read_reference',name='api'),action('ask',message='Уточните событие')])
         events=[]
