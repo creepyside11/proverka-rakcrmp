@@ -14,10 +14,10 @@ class ModelTests(unittest.IsolatedAsyncioTestCase):
     async def test_configuration_and_token_not_plaintext(self):
         q=NS(data='aimodel:glm',message=NS(chat=NS(type='private'),reply_text=AsyncMock()),answer=AsyncMock())
         await ai_models.choose(NS(callback_query=q,effective_user=NS(id=12)),self.context,self.store,12)
-        for text in ('https://example.com/v1','glm-real-id','secret-provider-token','299,50'):
+        for text in ('https://example.com/v1','glm-real-id','secret-provider-token'):
             u,_=self.update(text);self.assertTrue(await ai_models.input(u,self.context,self.store,12,'bot-token'))
         cfg=ai_models.config(self.store,'glm')
-        self.assertEqual(cfg['price_kopecks'],29950);self.assertNotIn('secret-provider-token',str(cfg))
+        self.assertEqual(cfg['price_kopecks'],1);self.assertNotIn('secret-provider-token',str(cfg))
         self.assertEqual(support_ai.crypt('bot-token').decrypt(cfg['token_cipher'].encode()).decode(),'secret-provider-token')
     async def test_only_admin_can_configure_and_cancel(self):
         self.context.user_data['ai_model_draft']={'step':'base','key':'glm'}
@@ -25,10 +25,10 @@ class ModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await ai_models.input(u,self.context,self.store,12,'bot-token'))
         u,_=self.update('/cancel');self.assertTrue(await ai_models.input(u,self.context,self.store,12,'bot-token'))
         self.assertNotIn('ai_model_draft',self.context.user_data)
-    async def test_reject_private_base_and_invalid_price(self):
+    async def test_reject_private_base_and_configure_without_price(self):
         self.context.user_data['ai_model_draft']={'step':'base','key':'glm'}
         u,_=self.update('http://127.0.0.1');await ai_models.input(u,self.context,self.store,12,'bot-token')
         self.assertEqual(self.context.user_data['ai_model_draft']['step'],'base')
-        for text in ('https://example.com/v1','glm','token','NaN'):
+        for text in ('https://example.com/v1','glm','token'):
             u,_=self.update(text);await ai_models.input(u,self.context,self.store,12,'bot-token')
-        self.assertEqual(self.context.user_data['ai_model_draft']['step'],'price');self.assertIsNone(ai_models.config(self.store,'glm'))
+        self.assertNotIn('ai_model_draft',self.context.user_data);self.assertIsNotNone(ai_models.config(self.store,'glm'))

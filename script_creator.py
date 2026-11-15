@@ -158,11 +158,8 @@ async def check_syntax(code):
         return {'status':'ok' if proc.returncode==0 else 'error','message':'Синтаксис Lua 5.4 корректен. Поведение и игровые действия не проверены.' if proc.returncode==0 else detail or 'Ошибка синтаксиса Lua.'}
 
 
-async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,max_output=1024,retry_hint=False,reservation_limit=None,on_usage=None,system_prompt=None):
-    if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите купленную модель.')
-    row=store.db.execute('SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>0 AND in_flight=0 ORDER BY balance DESC,created_at DESC LIMIT 1',(uid,selected)).fetchone()
-    if not row:raise web.HTTPPaymentRequired(text='Нет доступного оплаченного ключа для этой модели.')
-    key=ai_gateway.key_for(bot_token,row['order_ref'])
+async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,max_output=1024,retry_hint=False,reservation_limit=None,on_usage=None,system_prompt=None,on_key=None):
+    if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель.')
     # Preserve the current task even after long tool transcripts.
     anchor=next((m for m in reversed(messages) if m.get('role')=='user' and m.get('body','').startswith('Задача пользователя: ')),None)
     tail=messages[-18:] if anchor else messages[-19:]
@@ -184,9 +181,15 @@ async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,
     if reserve:ordered.insert(0,{'role':'user','content':anchor['body'][:reserve]})
     if retry_hint and len(ordered)<19:ordered.append({'role':'user','content':'Продолжи работу. Верни одно следующее действие в корректном JSON.'})
     payload={'model':selected,'max_tokens':max_output,'messages':[{'role':'system','content':system_prompt or PROMPT}]+ordered}
+    try:_,_,reservation=ai_gateway._validate(payload,max_tokens_limit=4096)
+    except ValueError:raise web.HTTPBadRequest(text='Не удалось подготовить запрос к модели.')
+    row=store.db.execute("SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>=? AND in_flight=0 ORDER BY CASE WHEN order_ref LIKE 'free:%' THEN 0 ELSE 1 END,balance DESC,created_at DESC LIMIT 1",(uid,selected,reservation)).fetchone()
+    if not row:raise web.HTTPPaymentRequired(text='Недостаточно доступных токенов. Получите бесплатные токены для этой модели.')
+    key=ai_gateway.key_for(bot_token,row['order_ref'])
+    if on_key is not None:on_key(row['order_ref'])
     async def get_json():return payload
     fake=SimpleNamespace(headers={'Authorization':'Bearer '+key},app={'store':store,'token':bot_token},json=get_json)
-    kwargs={'max_tokens_limit':4096}
+    kwargs={'max_tokens_limit':4096,'allow_free':True}
     if reservation_limit is not None:kwargs['reservation_limit']=reservation_limit
     result=await ai_gateway.completions(fake,**kwargs)
     value=json.loads(result.body)
@@ -201,11 +204,11 @@ async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,
 
 async def models(request,authorize):
     uid=await authorize(request,require_subscription=False)
-    rows=request.app['store'].db.execute('SELECT model_key,balance FROM ai_keys WHERE buyer=? AND in_flight=0 AND balance>0 ORDER BY balance DESC',(uid,))
+    rows=request.app['store'].db.execute("SELECT model_key,balance FROM ai_keys WHERE buyer=? AND in_flight=0 AND balance>0 ORDER BY CASE WHEN order_ref LIKE 'free:%' THEN 0 ELSE 1 END,balance DESC",(uid,))
     best={}
     for row in rows:
         key=row['model_key']
-        if key in ai_models.MODELS and key not in best:best[key]={'model':key,'name':ai_models.MODELS[key],'balance':row['balance']}
+        if key in ai_models.MODELS and ai_models.config(request.app['store'],key) and key not in best:best[key]={'model':key,'name':ai_models.MODELS[key],'balance':row['balance']}
     return web.json_response({'models':list(best.values())},headers={'Cache-Control':'no-store'})
 
 
@@ -228,7 +231,7 @@ async def messages(request,authorize):
         except (ValueError,TypeError):raise web.HTTPBadRequest(text='Укажите публичную ссылку GitHub вида https://github.com/owner/repo')
     budget=data.get('budget',50000)
     if isinstance(budget,bool) or not isinstance(budget,int) or not 2000<=budget<=200000:raise web.HTTPBadRequest(text='Лимит задачи должен быть от 2000 до 200000 токенов.')
-    if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель, для которой куплены токены.')
+    if selected not in ai_models.MODELS:raise web.HTTPBadRequest(text='Выберите модель.')
     async def generate(items):
         settings={'context_size':16000,'max_output':1024,'retry_hint':False}
         async def once():
@@ -236,7 +239,7 @@ async def messages(request,authorize):
             def record_usage(used):run['used']+=used
             async with support_ai.SLOTS:
                 if run['stop_requested']:raise JobStopped()
-                value=await paid_model(store,request.app['token'],uid,selected,items,reservation_limit=max(0,budget-run['used']),on_usage=record_usage,system_prompt=project_agent.PROMPT if mode=='github' else None,**settings)
+                value=await paid_model(store,request.app['token'],uid,selected,items,reservation_limit=max(0,budget-run['used']),on_usage=record_usage,system_prompt=project_agent.PROMPT if mode=='github' else None,on_key=lambda ref:run.update(last_ref=ref),**settings)
             if run['stop_requested']:raise JobStopped()
             return value
         def adapt(exc,attempt):
@@ -307,7 +310,7 @@ async def messages(request,authorize):
             emit('error','Не удалось завершить задание. Проверьте историю перед повтором.');run['state']='failed'
             run['result']={'ok':False,'message':'Не удалось получить ответ ИИ. Попробуйте ещё раз.','used':run['used'],'budget':budget}
         try:
-            balance_row=store.db.execute('SELECT balance FROM ai_keys WHERE buyer=? AND model_key=? AND in_flight=0 ORDER BY balance DESC LIMIT 1',(uid,selected)).fetchone()
+            balance_row=store.db.execute('SELECT balance FROM ai_keys WHERE buyer=? AND order_ref=? AND in_flight=0',(uid,run.get('last_ref',''))).fetchone()
             remaining=balance_row['balance'] if balance_row else None
         except Exception:remaining=None
         emit('billing',f"Израсходовано: {run['used']} токенов"+(f'; баланс: {remaining}' if remaining is not None else '; баланс недоступен или ожидает сверки'))

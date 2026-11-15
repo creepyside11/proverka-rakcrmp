@@ -45,7 +45,7 @@ def issue(store,bot_token,kind,order):
 
 
 def keys(store,bot_token,uid):
-    rows=store.db.execute('SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE buyer=? ORDER BY created_at DESC LIMIT 200',(uid,))
+    rows=store.db.execute("SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE buyer=? AND order_ref NOT LIKE 'free:%' ORDER BY created_at DESC LIMIT 200",(uid,))
     return [{'name':ai_models.MODELS.get(r['model_key'],r['model_key']),'model':r['model_key'],'balance':r['balance'],'pending':bool(r['in_flight']),'base_url':PUBLIC,'api_token':key_for(bot_token,r['order_ref'])} for r in rows]
 
 
@@ -121,12 +121,13 @@ def settle(store,usage_id,used):
     return True
 
 
-async def completions(request, *, max_tokens_limit=1024, reservation_limit=None):
+async def completions(request, *, max_tokens_limit=1024, reservation_limit=None, allow_free=False):
     auth=request.headers.get('Authorization','')
     if not auth.startswith('Bearer ') or not re.fullmatch(r'rak-[0-9a-f]{64}',auth[7:]):raise web.HTTPUnauthorized(text='Invalid API key')
     store=request.app['store'];row=store.db.execute('SELECT * FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
     if not row:raise web.HTTPUnauthorized(text='Invalid API key')
     row=dict(row)
+    if row['order_ref'].startswith('free:') and not allow_free:raise web.HTTPUnauthorized(text='Invalid API key')
     try:data=await request.json();messages,maximum,reservation=_validate(data,max_tokens_limit=max_tokens_limit)
     except (ValueError,TypeError):raise web.HTTPBadRequest(text='Некорректный запрос: проверьте messages, изображение и max_tokens.')
     if reservation_limit is not None and reservation>reservation_limit:raise web.HTTPPaymentRequired(text='Лимита задачи недостаточно для следующего запроса.')
@@ -163,14 +164,14 @@ async def account(request,authorize):
 async def models(request):
     auth=request.headers.get('Authorization','')
     if not auth.startswith('Bearer ') or not re.fullmatch(r'rak-[0-9a-f]{64}',auth[7:]):raise web.HTTPUnauthorized(text='Invalid API key')
-    row=request.app['store'].db.execute('SELECT model_key,balance,in_flight FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
-    if not row:raise web.HTTPUnauthorized(text='Invalid API key')
+    row=request.app['store'].db.execute('SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
+    if not row or row['order_ref'].startswith('free:'):raise web.HTTPUnauthorized(text='Invalid API key')
     return web.json_response({'object':'list','data':[{'id':row['model_key'],'object':'model','owned_by':'rakcrmp'}]},headers={'Cache-Control':'no-store'})
 
 
 async def balance(request):
     auth=request.headers.get('Authorization','')
     if not auth.startswith('Bearer ') or not re.fullmatch(r'rak-[0-9a-f]{64}',auth[7:]):raise web.HTTPUnauthorized(text='Invalid API key')
-    row=request.app['store'].db.execute('SELECT model_key,balance,in_flight FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
-    if not row:raise web.HTTPUnauthorized(text='Invalid API key')
+    row=request.app['store'].db.execute('SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE token_hash=?',(digest(auth[7:]),)).fetchone()
+    if not row or row['order_ref'].startswith('free:'):raise web.HTTPUnauthorized(text='Invalid API key')
     return web.json_response({'model':row['model_key'],'balance_tokens':row['balance'],'pending':bool(row['in_flight'])},headers={'Cache-Control':'no-store'})
