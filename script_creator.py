@@ -183,7 +183,7 @@ async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,
     payload={'model':selected,'max_tokens':max_output,'messages':[{'role':'system','content':system_prompt or PROMPT}]+ordered}
     try:_,_,reservation=ai_gateway._validate(payload,max_tokens_limit=4096)
     except ValueError:raise web.HTTPBadRequest(text='Не удалось подготовить запрос к модели.')
-    row=store.db.execute("SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>=? AND in_flight=0 ORDER BY CASE WHEN order_ref LIKE 'free:%' THEN 0 ELSE 1 END,balance DESC,created_at DESC LIMIT 1",(uid,selected,reservation)).fetchone()
+    row=store.db.execute("SELECT order_ref FROM ai_keys WHERE buyer=? AND model_key=? AND balance>=? AND in_flight=0 ORDER BY CASE WHEN order_ref LIKE ? THEN 0 ELSE 1 END,balance DESC,created_at DESC LIMIT 1",(uid,selected,reservation,'free:%')).fetchone()
     if not row:raise web.HTTPPaymentRequired(text='Недостаточно доступных токенов. Получите бесплатные токены для этой модели.')
     key=ai_gateway.key_for(bot_token,row['order_ref'])
     if on_key is not None:on_key(row['order_ref'])
@@ -204,7 +204,7 @@ async def paid_model(store,bot_token,uid,selected,messages,*,context_size=16000,
 
 async def models(request,authorize):
     uid=await authorize(request,require_subscription=False)
-    rows=request.app['store'].db.execute("SELECT model_key,balance FROM ai_keys WHERE buyer=? AND in_flight=0 AND balance>0 ORDER BY CASE WHEN order_ref LIKE 'free:%' THEN 0 ELSE 1 END,balance DESC",(uid,))
+    rows=request.app['store'].db.execute("SELECT model_key,balance FROM ai_keys WHERE buyer=? AND in_flight=0 AND balance>0 ORDER BY CASE WHEN order_ref LIKE ? THEN 0 ELSE 1 END,balance DESC",(uid,'free:%'))
     best={}
     for row in rows:
         key=row['model_key']

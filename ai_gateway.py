@@ -45,7 +45,7 @@ def issue(store,bot_token,kind,order):
 
 
 def keys(store,bot_token,uid):
-    rows=store.db.execute("SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE buyer=? AND order_ref NOT LIKE 'free:%' ORDER BY created_at DESC LIMIT 200",(uid,))
+    rows=store.db.execute("SELECT order_ref,model_key,balance,in_flight FROM ai_keys WHERE buyer=? AND order_ref NOT LIKE ? ORDER BY created_at DESC LIMIT 200",(uid,'free:%'))
     return [{'name':ai_models.MODELS.get(r['model_key'],r['model_key']),'model':r['model_key'],'balance':r['balance'],'pending':bool(r['in_flight']),'base_url':PUBLIC,'api_token':key_for(bot_token,r['order_ref'])} for r in rows]
 
 

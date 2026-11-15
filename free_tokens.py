@@ -22,7 +22,7 @@ def state(store,uid,now=None):
     now=time.time() if now is None else now
     rows=store.db.execute('SELECT model_key,claimed_at FROM ai_free_claims WHERE owner_id=?',(uid,))
     claims={r['model_key']:r['claimed_at'] for r in rows}
-    rows=store.db.execute("SELECT model_key,balance,in_flight FROM ai_keys WHERE buyer=? AND order_ref LIKE 'free:%'",(uid,))
+    rows=store.db.execute("SELECT model_key,balance,in_flight FROM ai_keys WHERE buyer=? AND order_ref LIKE ?",(uid,'free:%'))
     balances={r['model_key']:r for r in rows}
     return [{'model':model,'name':ai_models.MODELS[model],'amount':amount,
              'balance':balances[model]['balance'] if model in balances else 0,
