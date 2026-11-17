@@ -11,7 +11,7 @@ AGENT_PROTOCOL = '''Ты агент создания Lua-скриптов. Ис�
 {"action":"plan","steps":["шаг 1","шаг 2"]} — план из 1–6 коротких пунктов;
 {"action":"search","query":"поисковый запрос"} — поиск в DuckDuckGo;
 {"action":"open_url","url":"ссылка из поиска"} — прочитать найденную страницу;
-{"action":"read_reference","name":"api"} — прочитать API загрузчика; name="example" — посмотреть пример;
+{"action":"read_reference","name":"api"} — прочитать прежний API загрузчика; name="api_v2" — расширения v2; name="example" — посмотреть пример;
 {"action":"read_file"} — прочитать текущий script.lua;
 {"action":"read_lines","start":1,"count":80} — прочитать диапазон строк script.lua;
 {"action":"search_file","text":"строка"} — найти текст в файле;
@@ -97,17 +97,17 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
         elif kind=='read_reference':
             name=action.get('name')
             base=Path(__file__).resolve().parent/'black_loader'
-            paths={'api':base/'logic/lua/harness.lua','example':base/'scripts/lua/hello_addon.lua'}
+            paths={'api':base/'logic/lua/harness.lua','api_v2':base.parent/'LUA_API_V2_FOR_AI.md','example':base/'scripts/lua/hello_addon.lua'}
             path=paths.get(name) if isinstance(name,str) else None
             if path is None:
-                result='Доступны только справочники api и example.'
+                result='Доступны справочники api, api_v2 и example.'
             else:
                 try:
                     reference=path.read_text(encoding='utf-8')
                     if name=='api':
                         reference=reference[reference.find('br.walk ='):reference.find('br.walk =')+5000]
                     result='Справочник '+name+':\n'+reference[:5000]
-                    emit('file','Читаю справочник API загрузчика.' if name=='api' else 'Читаю пример скрипта.')
+                    emit('file','Читаю справочник API загрузчика.' if name in ('api','api_v2') else 'Читаю пример скрипта.')
                 except OSError:
                     result='Справочник недоступен.'
         elif kind=='read_file':
@@ -204,3 +204,4 @@ async def run(generate, check_syntax, user_text, previous_code, history, emit):
             last_check=await check_syntax(code);emit('check',last_check['message'])
         return {'answer':'Достигнут лимит шагов. Текущая версия скрипта:\n\n```lua\n'+code.rstrip()+'\n```','code':code,'changed':True,'check':last_check}
     return {'answer':'Не удалось завершить задачу за отведённое число шагов. Уточните задачу и попробуйте ещё раз.','code':None,'changed':False,'check':None}
+

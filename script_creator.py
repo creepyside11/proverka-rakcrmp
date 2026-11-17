@@ -18,7 +18,7 @@ from aiohttp import web
 import support_ai
 import aiohttp
 
-PROMPT = '''Ты помощник по созданию Lua-скриптов для проекта RakCRMP Black. Отвечай по-русски. Не выдумывай API: если не уверен в имени функции или данных игрового протокола, явно скажи об этом и попроси сведения. Скрипт рассчитан на существующий загрузчик с обработчиками on_load(e), on_spawn(e), on_chat(e), где текст чата находится в e.message. Доступны br.log(text), br.after(seconds, name, data), br.walk(x,y,z), br.drive(x,y,z), br.dialog(id,response,item,text), br.chat(text), br.setting(key,default). Изменения игровых действий должны проходить через API загрузчика. Не обещай работоспособность по результатам проверки синтаксиса. Не проси ключи и пароли.''' + '\n' + creator_agent.AGENT_PROTOCOL
+PROMPT = '''Ты помощник по созданию Lua-скриптов для проекта RakCRMP Black. Отвечай по-русски. Не выдумывай API: если не уверен в имени функции или данных игрового протокола, явно скажи об этом и попроси сведения. Скрипт рассчитан на существующий загрузчик с обработчиками on_load(e), on_spawn(e), on_chat(e), где текст чата находится в e.message. Доступны br.log(text), br.after(seconds, name, data), br.walk(x,y,z), br.drive(x,y,z), br.dialog(id,response,item,text), br.chat(text), br.setting(key,default). Изменения игровых действий должны проходить через API загрузчика. В актуальном загрузчике доступны расширения Lua API v2: обратись к справочнику api_v2, проверь br.api_version и учитывай, что старая установка их может не поддерживать. Хранилище в dry не пишет, в полигоне виртуально; серверные протоколы не выдумывай. Не обещай работоспособность по результатам проверки синтаксиса. Не проси ключи и пароли.''' + '\n' + creator_agent.AGENT_PROTOCOL
 LOCKS=[asyncio.Lock() for _ in range(64)]
 RATE={}
 RUNS={}
@@ -321,3 +321,4 @@ async def messages(request,authorize):
         return web.json_response({'ok':True,'started':True,'run_id':run['id']},headers={'Cache-Control':'no-store'})
     result=await execute()
     return web.json_response(result,headers={'Cache-Control':'no-store'})
+
