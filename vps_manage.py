@@ -1,5 +1,7 @@
 """Fixed-purpose management of an already installed RakCRMP VPS."""
 import asyncio
+import json
+import math
 import re
 import secrets
 import time
@@ -16,8 +18,70 @@ ACTIONS = {
     'start_panel': ('rakcrmp-panel.service', 'enable --now', 'Mini App запущено. Откройте кнопку «Панель» в установленном боте.'),
 }
 
+# Fixed, read-only probe. It does not touch systemd, locks or project files.
+RESOURCE_SCRIPT = r'''set -eu
+python3 - <<'PY'
+import json, os, time
+
+def cpu_sample():
+    with open('/proc/stat', encoding='ascii') as f:
+        fields = f.readline().split()
+    if fields[0] != 'cpu' or len(fields) < 5:
+        raise ValueError('CPU unavailable')
+    values = [int(x) for x in fields[1:9]]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return sum(values), idle
+
+first_total, first_idle = cpu_sample()
+time.sleep(1)
+total, idle = cpu_sample()
+delta = total - first_total
+if delta <= 0:
+    raise ValueError('CPU sample unavailable')
+cpu = max(0.0, min(100.0, 100.0 * (1.0 - (idle - first_idle) / delta)))
+memory = {}
+with open('/proc/meminfo', encoding='ascii') as f:
+    for line in f:
+        fields = line.split()
+        if fields and fields[0] in ('MemTotal:', 'MemAvailable:'):
+            memory[fields[0][:-1]] = int(fields[1]) * 1024
+ram_total, ram_available = memory['MemTotal'], memory['MemAvailable']
+disk = os.statvfs('/')
+disk_total = disk.f_blocks * disk.f_frsize
+disk_used = (disk.f_blocks - disk.f_bfree) * disk.f_frsize
+disk_available = disk.f_bavail * disk.f_frsize
+print(json.dumps({'cpu': cpu, 'ram_total': ram_total, 'ram_available': ram_available,
+                  'disk_total': disk_total, 'disk_used': disk_used,
+                  'disk_available': disk_available}, allow_nan=False))
+PY
+'''
+
+
+def format_resources(output):
+    """Accept only numeric, bounded fields from the remote host."""
+    if not isinstance(output, str) or len(output) > 2048:
+        raise ValueError('invalid response')
+    data = json.loads(output)
+    if not isinstance(data, dict):
+        raise ValueError('invalid response')
+    keys = ('cpu', 'ram_total', 'ram_available', 'disk_total', 'disk_used', 'disk_available')
+    if any(isinstance(data.get(k), bool) or not isinstance(data.get(k), (int, float))
+           or not math.isfinite(data[k]) or data[k] < 0 or data[k] > 10**19 for k in keys):
+        raise ValueError('invalid metrics')
+    cpu, total, available = data['cpu'], data['ram_total'], data['ram_available']
+    disk_total, disk_used, disk_available = data['disk_total'], data['disk_used'], data['disk_available']
+    if cpu > 100 or total <= 0 or available > total or disk_total <= 0 or disk_used > disk_total or disk_available > disk_total:
+        raise ValueError('inconsistent metrics')
+    gib = 1024**3
+    return (f'📊 Ресурсы VPS\nCPU: {cpu:.1f}% (за 1 секунду)\n'
+            f'RAM: занято примерно {(total-available)/gib:.2f} из {total/gib:.2f} ГиБ; доступно {available/gib:.2f} ГиБ\n'
+            f'Диск /: занято {disk_used/gib:.2f} из {disk_total/gib:.2f} ГиБ; доступно {disk_available/gib:.2f} ГиБ\n'
+            'Проверка не останавливает работающие программы.')
+
 
 def command_script(action, replace_accounts=False):
+    if action == 'resources':
+        return RESOURCE_SCRIPT
     if action == 'update_bot':
         return UPDATE_SCRIPT.replace('allow_replace=0 # confirmation marker', 'allow_replace=1 # confirmation marker' if replace_accounts else 'allow_replace=0 # confirmation marker')
     if action == 'setup_bridge':
@@ -148,7 +212,7 @@ rm -rf -- "$backup"
 async def start(request, authorize):
     uid=await authorize(request);data=await vi.get_json(request);vi.collect_old()
     action=data.get('action');user=data.get('username');password=data.get('password')
-    if action not in (*ACTIONS, 'update_bot', 'setup_bridge'):
+    if action not in (*ACTIONS, 'update_bot', 'setup_bridge', 'resources'):
         raise web.HTTPBadRequest(text='Выберите доступное действие.')
     if not isinstance(user,str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}',user):
         raise web.HTTPBadRequest(text='Укажите корректный логин SSH.')
@@ -173,13 +237,22 @@ async def start(request, authorize):
                 async with asyncssh.connect(probe['host'],port=22,username=user,password=password,known_hosts=([probe['key']],[],[]),client_keys=[],agent_path=None,config=None,login_timeout=20) as conn:
                     check=await conn.run('id -u',check=True,timeout=10)
                     root=check.stdout.strip()=='0'
-                    if not root and (await conn.run('sudo -n true',timeout=10)).exit_status!=0:
+                    if action!='resources' and not root and (await conn.run('sudo -n true',timeout=10)).exit_status!=0:
                         vi.JOBS[jid].update(state='failed',message='Нужен root или sudo без пароля.');return
                     if action=='update_bot': vi.JOBS[jid]['message']='Проверяем обновление и сохраняем резервную копию окружения.'
                     elif action=='setup_bridge': vi.JOBS[jid]['message']='Устанавливаем и проверяем sing-box и локальный SOCKS5-мост.'
-                    result=await conn.run('/bin/bash -s' if root else 'sudo -n /bin/bash -s',input=script,timeout=900)
+                    elif action=='resources': vi.JOBS[jid]['message']='Измеряем нагрузку CPU и проверяем память и диск.'
+                    command='/bin/bash -s' if root or action=='resources' else 'sudo -n /bin/bash -s'
+                    result=await conn.run(command,input=script,timeout=15 if action=='resources' else 900)
                     messages={21:'Нужны права администратора VPS.',22:'Установка программы на VPS не найдена.',23:'Служба не найдена. Сначала установите программу или запустите Mini App.',24:'На этом VPS уже выполняется другая операция.',25:'Служба не выполнила команду.',26:'Служба не запустилась или сразу остановилась.',30:'Не удалось определить установленную версию.',31:'Не удалось получить обновление с GitHub.',32:'Новая версия не является продолжением установленной. Автоматическое обновление остановлено.',33:'В файлах программы обнаружены локальные изменения. Обновление остановлено, чтобы не потерять данные.',34:'Не удалось создать резервную копию окружения. Программа не изменена.',35:'Не удалось остановить программу для обновления.',36:'Обновление конфликтует с локальными файлами. Предыдущая версия восстановлена.',37:'Не удалось установить зависимости. Предыдущая версия восстановлена.',38:'Обновлённая программа не запустилась. Предыдущая версия восстановлена.',39:'Не удалось автоматически восстановить предыдущую версию; проверьте VPS и резервную копию.',40:'Для замены файла аккаунтов требуется отдельное подтверждение. Никакие данные не изменены.',41:'Файл аккаунтов является ссылкой или не обычным файлом. Обновление отменено.',42:'Не удалось установить Lua 5.4. Предыдущая версия и аккаунты восстановлены.',43:'Путь sing-box в конфигурации отличается от установочного. Существующие настройки не изменены.',44:'Архитектура VPS не поддерживается.',45:'Не удалось скачать или проверить sing-box. Существующий бинарник не изменён.',46:'Тестовый SOCKS5-мост не запустился. Существующий бинарник и настройки не изменены.',47:'Не удалось установить новый sing-box.'}
-                    if action=='update_bot' and result.exit_status==10:
+                    if action=='resources' and result.exit_status==0:
+                        try:
+                            message=format_resources(result.stdout)
+                        except (ValueError, TypeError, OverflowError):
+                            vi.JOBS[jid].update(state='failed',message='Не удалось разобрать показатели VPS.')
+                        else:
+                            vi.JOBS[jid].update(state='done',message=message)
+                    elif action=='update_bot' and result.exit_status==10:
                         vi.JOBS[jid].update(state='done',message='Программа уже обновлена до последней версии.')
                     elif action=='setup_bridge' and result.exit_status in (12,13,14):
                         notice={12:'sing-box установлен и проверен. Программа сейчас остановлена: запустите её, затем проверьте VPN-узлы.',13:'sing-box установлен и проверен. Ранее он отсутствовал: перезапустите программу, чтобы она увидела мост, затем проверьте VPN-узлы.',14:'sing-box установлен и проверен, но запустить проверку VPN-узлов через программу не удалось. Откройте её меню VPN и нажмите «Проверить сейчас».'}
