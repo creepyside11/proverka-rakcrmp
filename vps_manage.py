@@ -275,13 +275,13 @@ async def start(request, authorize):
                             vi.JOBS[jid].update(state='done',message=message)
                     elif action=='update_bot' and result.exit_status==10:
                         vi.JOBS[jid].update(state='done',message='Программа уже обновлена до последней версии.')
-                    elif action=='setup_bridge' and result.exit_status in (12,13,14):
-                        notice={12:'sing-box установлен и проверен. Программа сейчас остановлена: запустите её, затем проверьте VPN-узлы.',13:'sing-box установлен и проверен. Ранее он отсутствовал: перезапустите программу, чтобы она увидела мост, затем проверьте VPN-узлы.',14:'sing-box установлен и проверен, но запустить проверку VPN-узлов через программу не удалось. Откройте её меню VPN и нажмите «Проверить сейчас».'}
+                    elif action=='setup_bridge' and result.exit_status in (12,13,14,15):
+                        notice={12:'sing-box установлен и проверен локально. Программа сейчас остановлена: запустите её и проверьте VPN-узлы.',13:'sing-box установлен и проверен локально. Перезапустите программу, затем проверьте VPN-узлы.',14:'sing-box установлен и проверен локально, но запросить проверку VPN-узлов не удалось. Откройте меню VPN и нажмите «Проверить сейчас».',15:'sing-box установлен и проверен локально. Программе отправлен запрос на проверку узлов; дождитесь её завершения и проверьте причины в меню VPN. Если клиент не обнаружен, обновите программу и перезапустите её в удобное время.'}
                         vi.JOBS[jid].update(state='done',message=notice[result.exit_status])
                     elif result.exit_status!=0:
                         vi.JOBS[jid].update(state='failed',message=messages.get(result.exit_status,'Не удалось выполнить действие на VPS.'))
                     else:
-                        text=('Программа обновлена. Если файл аккаунтов был заменён, резервная копия сохранена на VPS в /etc/rakcrmp-black/account-backups/. Если программа была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box установлен и проверен; программе отправлен запрос на проверку сохранённых VPN-узлов. Добавьте подписку, если её ещё нет.' if action=='setup_bridge' else ACTIONS[action][2])
+                        text=('Программа обновлена. Если файл аккаунтов был заменён, резервная копия сохранена на VPS в /etc/rakcrmp-black/account-backups/. Если программа была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box проверен локально; программе отправлен запрос на проверку VPN-узлов. Дождитесь результатов в меню VPN: локальная проверка не подтверждает работу самих узлов.' if action=='setup_bridge' else ACTIONS[action][2])
                         vi.JOBS[jid].update(state='done',message=text)
         except asyncssh.HostKeyNotVerifiable:
             vi.JOBS[jid].update(state='failed',message='SSH-ключ изменился. Подключение остановлено.')

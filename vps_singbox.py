@@ -66,7 +66,6 @@ had_old=0
 install -m 0755 "$tmp/sing-box" "$runtime/.sing-box-new-$$" || exit 47
 mv -f -- "$runtime/.sing-box-new-$$" "$runtime/sing-box" || exit 47
 if ! systemctl is-active --quiet rakcrmp-black.service; then exit 12; fi
-if [ "$had_old" = 0 ]; then exit 13; fi
 # Ask the running bot to refresh its saved subscription nodes. The existing
 # pool owns bridge lifetimes and protects nodes in active use.
 runuser -u rakcrmp-black -- "$root/.venv/bin/python" - >/dev/null 2>&1 <<'REFRESH' || exit 14
@@ -74,4 +73,5 @@ from logic.web_bridge import submit
 reply = submit('vpn_refresh', {}, timeout=12)
 if not reply.get('ok'): raise SystemExit(1)
 REFRESH
+if [ "$had_old" = 0 ]; then exit 15; fi
 '''
