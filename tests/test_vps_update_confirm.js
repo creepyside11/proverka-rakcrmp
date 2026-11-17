@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('miniapp.html','utf8');
-const start=html.indexOf('async function confirmAccountsReplacement()');
+const start=html.indexOf("document.querySelectorAll('[data-vps-action]').forEach(button=>button.onclick");
 const end=html.indexOf('let luaSession=',start);
 assert(start>=0 && end>start,'update confirmation is wired into the real page');
 const code=html.slice(start,end), inputs={
@@ -17,12 +17,11 @@ const context={document:{querySelectorAll:()=>buttons},window:{confirm:()=>ok},t
  pollInstall:()=>{},api:async(path,opts)=>{requests.push(JSON.parse(opts.body));return {job_id:'job'}},Promise};
 vm.runInNewContext(code,context);
 (async()=>{
- await buttons[0].onclick();assert.equal(prompts,1);assert.equal(requests.length,0,'cancel must not start an update');
- ok=true;await buttons[0].onclick();assert.equal(requests.length,1);assert.equal(requests[0].action,'update_bot');assert.strictEqual(requests[0].replace_accounts,true);
+ await buttons[0].onclick();assert.equal(prompts,0);assert.equal(requests.length,1);assert.equal(requests[0].action,'update_bot');assert.strictEqual(requests[0].replace_accounts,false);
  context.installProbe='probe';inputs['vps-password'].value='secret';buttons.forEach(x=>x.disabled=false);
- await buttons[1].onclick();assert.equal(prompts,2,'non-update actions do not prompt for accounts');assert.strictEqual(requests[1].replace_accounts,false);
+ await buttons[1].onclick();assert.equal(prompts,0,'non-update actions do not prompt for accounts');assert.strictEqual(requests[1].replace_accounts,false);
  context.installProbe='probe';inputs['vps-password'].value='secret';buttons.forEach(x=>x.disabled=false);
- await buttons[2].onclick();assert.equal(prompts,2,'resource check does not prompt to replace accounts');
+ await buttons[2].onclick();assert.equal(prompts,0,'resource check does not prompt to replace accounts');
  assert.equal(requests[2].action,'resources');assert.strictEqual(requests[2].replace_accounts,false);assert.equal(requests[2].online_bots,23);
  context.installProbe='probe';inputs['vps-password'].value='secret';inputs['vps-online-bots'].value='-2';buttons.forEach(x=>x.disabled=false);
  await buttons[2].onclick();assert.equal(requests.length,3,'invalid online count must not start a request');

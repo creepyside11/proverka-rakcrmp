@@ -101,7 +101,7 @@ def command_script(action, replace_accounts=False):
     if action == 'resources':
         return RESOURCE_SCRIPT
     if action == 'update_bot':
-        return UPDATE_SCRIPT.replace('allow_replace=0 # confirmation marker', 'allow_replace=1 # confirmation marker' if replace_accounts else 'allow_replace=0 # confirmation marker')
+        return UPDATE_SCRIPT
     if action == 'setup_bridge':
         return vps_singbox.BRIDGE_SCRIPT
     unit, operation, _ = ACTIONS[action]
@@ -117,8 +117,7 @@ systemctl {operation} {unit} >/dev/null 2>&1 || exit 25
 '''
 
 
-# Other local files are never force-reset. An account file is replaced only
-# after explicit confirmation and a private, retained backup has been created.
+# Other local files are never force-reset; the account file is preserved.
 UPDATE_SCRIPT = r'''set -eu
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=l
@@ -135,14 +134,12 @@ asowner git fetch -q --depth=100 https://github.com/creepyside11/black.git refs/
 new=$(asowner git rev-parse --verify FETCH_HEAD) || exit 31
 [ "$new" != "$old" ] || exit 10
 asowner git merge-base --is-ancestor "$old" "$new" || exit 32
-allow_replace=0 # confirmation marker
 accounts_changed=0
 if asowner git diff --quiet "$old" "$new" -- accounts.json; then :; else
     diff_code=$?
     [ "$diff_code" -eq 1 ] || exit 30
     accounts_changed=1
 fi
-if [ "$accounts_changed" -eq 1 ] && [ "$allow_replace" -ne 1 ]; then exit 40; fi
 asowner git diff --quiet HEAD -- . ':(exclude)accounts.json' || exit 33
 [ -d /opt/rakcrmp-black-runtime ] || exit 22
 backup=$(mktemp -d /opt/rakcrmp-black-runtime/update-backup.XXXXXXXX) || exit 34
@@ -211,6 +208,9 @@ if [ "$accounts_changed" = 1 ]; then
     fi
 fi
 asowner git checkout -q --detach --no-overwrite-ignore "$new" || restore 36
+if [ "$account_touched" = 1 ] && [ "$account_existed" = 1 ]; then
+    cp -a -- "$account_backup/accounts.json" "$root/accounts.json" || restore 39
+fi
 if ! command -v lua5.4 >/dev/null 2>&1; then
     apt-get update -qq >/dev/null 2>&1 || restore 42
     apt-get install -y -qq lua5.4 >/dev/null 2>&1 || restore 42
@@ -281,7 +281,7 @@ async def start(request, authorize):
                     elif result.exit_status!=0:
                         vi.JOBS[jid].update(state='failed',message=messages.get(result.exit_status,'Не удалось выполнить действие на VPS.'))
                     else:
-                        text=('Программа обновлена. Если файл аккаунтов был заменён, резервная копия сохранена на VPS в /etc/rakcrmp-black/account-backups/. Если программа была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box проверен локально; программе отправлен запрос на проверку VPN-узлов. Дождитесь результатов в меню VPN: локальная проверка не подтверждает работу самих узлов.' if action=='setup_bridge' else ACTIONS[action][2])
+                        text=('Программа обновлена. Существующий файл аккаунтов сохранён; если он изменялся в обновлении, создана резервная копия в /etc/rakcrmp-black/account-backups/. Если программа была остановлена, она осталась остановленной.' if action=='update_bot' else 'sing-box проверен локально; программе отправлен запрос на проверку VPN-узлов. Дождитесь результатов в меню VPN: локальная проверка не подтверждает работу самих узлов.' if action=='setup_bridge' else ACTIONS[action][2])
                         vi.JOBS[jid].update(state='done',message=text)
         except asyncssh.HostKeyNotVerifiable:
             vi.JOBS[jid].update(state='failed',message='SSH-ключ изменился. Подключение остановлено.')

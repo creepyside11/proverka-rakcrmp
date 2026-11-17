@@ -51,11 +51,11 @@ class ScriptTests(unittest.TestCase):
                 script=vps_manage.UPDATE_SCRIPT.replace('/opt/rakcrmp-black-runtime',str(runtime)).replace('/opt/rakcrmp-black',str(app)).replace('/etc/rakcrmp-black',str(config)).replace('/etc/systemd/system',str(units)).replace('https://github.com/creepyside11/black.git',str(up))
                 env=os.environ.copy();env.update(PATH=str(bins)+':'+env['PATH'],ACTIVE_FILE=str(active),PIP_FAIL='1' if pip_failure else '0')
                 r=subprocess.run(['bash'],input=script,text=True,capture_output=True,env=env,timeout=30)
-                self.assertEqual(r.returncode,37 if pip_failure else 40 if scenario=='account_conflict' else 0,r.stderr)
-                self.assertEqual(run('git','rev-parse','HEAD',cwd=app),old if scenario in ('pip_failure','account_conflict') else new)
+                self.assertEqual(r.returncode,37 if pip_failure else 0,r.stderr)
+                self.assertEqual(run('git','rev-parse','HEAD',cwd=app),old if pip_failure else new)
                 self.assertEqual((app/'accounts.json').read_text(),'{"accounts": ["my-account"]}')
                 self.assertEqual(active.exists(),scenario!='stopped')
-                self.assertEqual((app/'.venv/bin/marker').read_text(),'original' if scenario in ('pip_failure','account_conflict') else 'changed')
+                self.assertEqual((app/'.venv/bin/marker').read_text(),'original' if pip_failure else 'changed')
 
 class ConfirmedAccountUpdateTests(unittest.TestCase):
     def test_confirmation_backup_and_rollback(self):
@@ -87,16 +87,14 @@ class ConfirmedAccountUpdateTests(unittest.TestCase):
                 script=vps_manage.command_script('update_bot',replace_accounts=case!='deny').replace('/opt/rakcrmp-black-runtime',str(runtime)).replace('/opt/rakcrmp-black',str(app)).replace('/etc/rakcrmp-black',str(config)).replace('/etc/systemd/system',str(units)).replace('https://github.com/creepyside11/black.git',str(up))
                 env=os.environ.copy();env.update(PATH=str(bins)+':'+env['PATH'],ACTIVE_FILE=str(active),START_FAIL_FILE=str(fail_once),APP_DIR=str(app),PIP_FAIL='1' if case=='pip_fail' else '0')
                 result=subprocess.run(['bash'],input=script,text=True,capture_output=True,env=env,timeout=30)
-                expected={'accept':0,'deny':40,'pip_fail':37,'start_fail':38,'symlink':41,'remove':0,'other_change':33}[case]
+                expected={'accept':0,'deny':0,'pip_fail':37,'start_fail':38,'symlink':41,'remove':0,'other_change':33}[case]
                 self.assertEqual(result.returncode,expected,result.stderr)
-                self.assertEqual(run('git','rev-parse','HEAD',cwd=app),new if case in ('accept','remove') else old)
+                self.assertEqual(run('git','rev-parse','HEAD',cwd=app),new if case in ('accept','deny','remove') else old)
                 self.assertTrue(active.exists())
-                if case=='remove':self.assertFalse((app/'accounts.json').exists())
-                elif case=='accept':self.assertEqual((app/'accounts.json').read_text(),'upstream-new')
-                elif case=='symlink':self.assertEqual((t/'target').read_text(),'untouched');self.assertTrue((app/'accounts.json').is_symlink())
+                if case=='symlink':self.assertEqual((t/'target').read_text(),'untouched');self.assertTrue((app/'accounts.json').is_symlink())
                 else:self.assertEqual((app/'accounts.json').read_text(),'my-live-accounts')
                 backups=list((config/'account-backups').glob('update.*/accounts.json'))
-                if case in ('accept','remove','pip_fail','start_fail'):
+                if case in ('accept','deny','remove','pip_fail','start_fail'):
                     self.assertEqual(len(backups),1);self.assertEqual(backups[0].read_text(),'my-live-accounts');self.assertEqual(backups[0].stat().st_mode & 0o077,0)
                 else:self.assertFalse(backups)
                 if case=='start_fail':self.assertEqual((backups[0].parent/'after-failure.json').read_text(),'new-version-write\n')
