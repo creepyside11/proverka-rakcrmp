@@ -57,7 +57,7 @@ PY
 '''
 
 
-def format_resources(output, online_bots=None):
+def parse_resources(output):
     """Accept only numeric, bounded fields from the remote host."""
     if not isinstance(output, str) or len(output) > 2048:
         raise ValueError('invalid response')
@@ -72,29 +72,90 @@ def format_resources(output, online_bots=None):
     disk_total, disk_used, disk_available = data['disk_total'], data['disk_used'], data['disk_available']
     if cpu > 100 or total <= 0 or available > total or disk_total <= 0 or disk_used > disk_total or disk_available > disk_total:
         raise ValueError('inconsistent metrics')
+    return data
+
+# Ephemeral calibration, scoped to the Telegram user, VPS and SSH login.
+# No credentials or account data are retained. Lost on bot restart.
+RESOURCE_SAMPLES = {}
+RESOURCE_SAMPLE_TTL = 12 * 60 * 60
+
+
+def _capacity(data, online_bots, previous):
+    """Use two measurements, without pretending unobserved resource costs are zero."""
+    ram_reserve = max(200 * 1024**2, data['ram_total'] * .20)
+    disk_reserve = max(1024**3, data['disk_total'] * .10)
+    rooms = {'CPU': 70.0 - data['cpu'],
+             'RAM': data['ram_available'] - ram_reserve,
+             'Диск': data['disk_available'] - disk_reserve}
+    if any(room <= 0 for room in rooms.values()):
+        exhausted = ', '.join(name for name, room in rooms.items() if room <= 0)
+        return f'\nОбщий запас: 0 дополнительных ботов — исчерпан резерв: {exhausted}.'
+    if previous is None or previous['count'] == online_bots:
+        return ('\nДля общей оценки сделайте два замера: укажите число ботов сейчас, '
+                'затем измените его и повторите проверку после стабилизации нагрузки.')
+    old, old_count = previous['metrics'], previous['count']
+    if old['ram_total'] != data['ram_total'] or old['disk_total'] != data['disk_total']:
+        return '\nПараметры VPS изменились. Повторите замеры для калибровки.'
+    low, high = (old, data) if old_count < online_bots else (data, old)
+    count_delta = abs(old_count - online_bots)
+    deltas = {'CPU': high['cpu'] - low['cpu'],
+              'RAM': low['ram_available'] - high['ram_available'],
+              'Диск': low['disk_available'] - high['disk_available']}
+    # Small or negative deltas are indistinguishable from noise or shared use.
+    minima = {'CPU': .5, 'RAM': 1024**2, 'Диск': 1024**2}
+    unknown = [name for name in deltas if deltas[name] < minima[name]]
+    lines = ['\nСравнение двух замеров: ботов было ' + str(old_count) + ', сейчас ' + str(online_bots) + '.']
+    limits = {}
+    for name in ('CPU', 'RAM', 'Диск'):
+        if name in unknown:
+            lines.append(f'{name}: расход на бота не удалось надёжно оценить.')
+        else:
+            rate = deltas[name] / count_delta
+            limits[name] = max(0, math.floor(rooms[name] / rate))
+            lines.append(f'{name}: ориентировочно ещё {limits[name]}.')
+    if unknown:
+        lines.append('Общее число пока неизвестно: повторите замеры при большей разнице числа ботов и стабильной нагрузке.')
+    else:
+        limit = min(limits.values())
+        limiting = ', '.join(name for name, n in limits.items() if n == limit)
+        lines.append(f'🤖 Вместе ориентировочно ещё {limit}; ограничивает: {limiting}.')
+    lines.append('Расчёт приблизительный: фоновые задачи, кеш RAM и рост логов влияют на разницу; '
+                 'диск зависит также от времени работы. Оставлены резервы: CPU до 70%, RAM 20% или 200 МиБ, диск 10% или 1 ГиБ.')
+    return '\n'.join(lines)
+
+
+def format_resources(output, online_bots=None, previous=None):
+    data = parse_resources(output)
+    cpu, total, available = data['cpu'], data['ram_total'], data['ram_available']
+    disk_total, disk_used, disk_available = data['disk_total'], data['disk_used'], data['disk_available']
     gib = 1024**3
     result = (f'📊 Ресурсы VPS\nCPU: {cpu:.1f}% (в среднем за 5 секунд)\n'
             f'RAM: занято примерно {(total-available)/gib:.2f} из {total/gib:.2f} ГиБ; доступно {available/gib:.2f} ГиБ\n'
             f'Диск /: занято {disk_used/gib:.2f} из {disk_total/gib:.2f} ГиБ; доступно {disk_available/gib:.2f} ГиБ\n'
             'Проверка не останавливает работающие программы.')
+    if online_bots is None:
+        return result + '\nДля оценки укажите число ботов онлайн перед проверкой.'
+    if isinstance(online_bots, bool) or not isinstance(online_bots, int) or not 1 <= online_bots <= 100000:
+        raise ValueError('invalid bot count')
+    return result + f'\n\n🤖 Указано ботов онлайн: {online_bots}.' + _capacity(data, online_bots, previous)
+
+
+def calibrated_resources(output, online_bots, key):
+    data = parse_resources(output)
+    now = time.monotonic()
+    for k, sample in list(RESOURCE_SAMPLES.items()):
+        if now - sample['at'] > RESOURCE_SAMPLE_TTL:
+            RESOURCE_SAMPLES.pop(k, None)
+    previous = RESOURCE_SAMPLES.get(key) if online_bots is not None else None
+    text = format_resources(output, online_bots, previous)
     if online_bots is not None:
-        if isinstance(online_bots, bool) or not isinstance(online_bots, int) or not 1 <= online_bots <= 100000:
-            raise ValueError('invalid bot count')
-        result += f'\n\n🤖 Указано ботов онлайн: {online_bots}.'
-        if cpu < 1:
-            result += '\nНагрузка CPU слишком мала для оценки. Повторите проверку, когда боты работают.'
-        else:
-            extra = max(0, math.floor(online_bots * (70.0 / cpu - 1)))
-            result += f'\nПо CPU ориентировочно ещё: {extra} (до 70% загрузки).'
-            result += ('\nЭто приблизительный расчёт по текущему замеру, не гарантия: '
-                       'другие процессы и задачи ботов тоже нагружают CPU. Расход RAM на бота не измерен.')
-        if available < max(200 * 1024**2, total * 0.2):
-            result += '\n⚠️ Свободной RAM мало: добавлять ботов до проверки памяти не рекомендуется.'
-        if disk_available < 1024**3:
-            result += '\n⚠️ На диске осталось меньше 1 ГиБ.'
-    else:
-        result += '\nДля оценки укажите число ботов онлайн перед проверкой.'
-    return result
+        # Refresh the baseline on same-count measurements; otherwise use the
+        # earlier sample throughout its TTL to allow a larger contrast.
+        if previous is None or previous['count'] == online_bots:
+            if len(RESOURCE_SAMPLES) >= 512 and key not in RESOURCE_SAMPLES:
+                RESOURCE_SAMPLES.pop(min(RESOURCE_SAMPLES, key=lambda k: RESOURCE_SAMPLES[k]['at']))
+            RESOURCE_SAMPLES[key] = {'count': online_bots, 'metrics': data, 'at': now}
+    return text
 
 
 def command_script(action, replace_accounts=False):
@@ -268,7 +329,7 @@ async def start(request, authorize):
                     messages={21:'Нужны права администратора VPS.',22:'Установка программы на VPS не найдена.',23:'Служба не найдена. Сначала установите программу или запустите Mini App.',24:'На этом VPS уже выполняется другая операция.',25:'Служба не выполнила команду.',26:'Служба не запустилась или сразу остановилась.',30:'Не удалось определить установленную версию.',31:'Не удалось получить обновление с GitHub.',32:'Новая версия не является продолжением установленной. Автоматическое обновление остановлено.',33:'В файлах программы обнаружены локальные изменения. Обновление остановлено, чтобы не потерять данные.',34:'Не удалось создать резервную копию окружения. Программа не изменена.',35:'Не удалось остановить программу для обновления.',36:'Обновление конфликтует с локальными файлами. Предыдущая версия восстановлена.',37:'Не удалось установить зависимости. Предыдущая версия восстановлена.',38:'Обновлённая программа не запустилась. Предыдущая версия восстановлена.',39:'Не удалось автоматически восстановить предыдущую версию; проверьте VPS и резервную копию.',40:'Для замены файла аккаунтов требуется отдельное подтверждение. Никакие данные не изменены.',41:'Файл аккаунтов является ссылкой или не обычным файлом. Обновление отменено.',42:'Не удалось установить Lua 5.4. Предыдущая версия и аккаунты восстановлены.',43:'Путь sing-box в конфигурации отличается от установочного. Существующие настройки не изменены.',44:'Архитектура VPS не поддерживается.',45:'Не удалось скачать или проверить sing-box. Существующий бинарник не изменён.',46:'Тестовый SOCKS5-мост не запустился. Существующий бинарник и настройки не изменены.',47:'Не удалось установить новый sing-box.'}
                     if action=='resources' and result.exit_status==0:
                         try:
-                            message=format_resources(result.stdout, online_bots)
+                            message=calibrated_resources(result.stdout, online_bots, (uid, probe['host'], user))
                         except (ValueError, TypeError, OverflowError):
                             vi.JOBS[jid].update(state='failed',message='Не удалось разобрать показатели VPS.')
                         else:

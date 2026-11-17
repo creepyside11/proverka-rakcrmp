@@ -18,16 +18,37 @@ import vps_manage as vm
 
 class ResourceScriptTests(unittest.TestCase):
     def test_capacity_estimate_and_boundaries(self):
-        valid={'cpu':28,'ram_total':1024**3,'ram_available':600*1024**2,'disk_total':10*1024**3,'disk_used':3*1024**3,'disk_available':6*1024**3}
-        self.assertIn('ещё: 34', vm.format_resources(json.dumps(valid), 23))
-        self.assertIn('RAM на бота не измерен', vm.format_resources(json.dumps(valid), 23))
-        self.assertIn('Свободной RAM мало', vm.format_resources(json.dumps({**valid,'ram_available':100*1024**2}), 23))
-        self.assertIn('слишком мала', vm.format_resources(json.dumps({**valid,'cpu':0}), 23))
-        self.assertIn('ещё: 0', vm.format_resources(json.dumps({**valid,'cpu':80}), 23))
-        self.assertIn('укажите число', vm.format_resources(json.dumps(valid)))
+        mib=1024**2; gib=1024**3
+        old={'cpu':20,'ram_total':2*gib,'ram_available':1200*mib,'disk_total':10*gib,'disk_used':3*gib,'disk_available':6*gib}
+        new={**old,'cpu':30,'ram_available':1100*mib,'disk_available':5900*mib}
+        baseline={'count':10,'metrics':old,'at':0}
+        result=vm.format_resources(json.dumps(new),20,baseline)
+        self.assertIn('CPU: ориентировочно ещё 40',result)
+        self.assertIn('RAM: ориентировочно ещё 69',result)
+        self.assertIn('Диск: ориентировочно ещё 199',result)
+        self.assertIn('Вместе ориентировочно ещё 40; ограничивает: CPU',result)
+        self.assertIn('два замера', vm.format_resources(json.dumps(old),10))
+        self.assertIn('Общее число пока неизвестно',vm.format_resources(json.dumps({**new,'disk_available':old['disk_available']}),20,baseline))
+        self.assertIn('Общий запас: 0',vm.format_resources(json.dumps({**new,'ram_available':100*mib}),20,baseline))
+        self.assertIn('Общий запас: 0',vm.format_resources(json.dumps({**new,'cpu':80}),20,baseline))
+        self.assertIn('укажите число', vm.format_resources(json.dumps(old)))
         for count in (0,-1,True,1.5,100001,'23'):
             with self.subTest(count=count), self.assertRaises(ValueError):
-                vm.format_resources(json.dumps(valid), count)
+                vm.format_resources(json.dumps(old),count)
+
+    def test_calibration_is_scoped_and_expires(self):
+        vm.RESOURCE_SAMPLES.clear()
+        gib=1024**3
+        old={'cpu':20,'ram_total':2*gib,'ram_available':int(1.4*gib),'disk_total':10*gib,'disk_used':3*gib,'disk_available':6*gib}
+        new={**old,'cpu':30,'ram_available':int(1.2*gib),'disk_available':int(5.8*gib)}
+        a=(42,'same-host','root'); b=(43,'same-host','root'); c=(42,'another-host','root')
+        with patch.object(vm.time,'monotonic',return_value=10):
+            self.assertIn('два замера',vm.calibrated_resources(json.dumps(old),10,a))
+            self.assertIn('два замера',vm.calibrated_resources(json.dumps(new),20,b))
+            self.assertIn('два замера',vm.calibrated_resources(json.dumps(new),20,c))
+            self.assertIn('Вместе ориентировочно',vm.calibrated_resources(json.dumps(new),20,a))
+        with patch.object(vm.time,'monotonic',return_value=10+vm.RESOURCE_SAMPLE_TTL+1):
+            self.assertIn('два замера',vm.calibrated_resources(json.dumps(new),20,a))
 
     def test_script_collects_real_metrics_without_touching_processes(self):
         with tempfile.TemporaryDirectory() as temp:
