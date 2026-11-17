@@ -17,6 +17,18 @@ import vps_manage as vm
 
 
 class ResourceScriptTests(unittest.TestCase):
+    def test_capacity_estimate_and_boundaries(self):
+        valid={'cpu':28,'ram_total':1024**3,'ram_available':600*1024**2,'disk_total':10*1024**3,'disk_used':3*1024**3,'disk_available':6*1024**3}
+        self.assertIn('ещё: 34', vm.format_resources(json.dumps(valid), 23))
+        self.assertIn('RAM на бота не измерен', vm.format_resources(json.dumps(valid), 23))
+        self.assertIn('Свободной RAM мало', vm.format_resources(json.dumps({**valid,'ram_available':100*1024**2}), 23))
+        self.assertIn('слишком мала', vm.format_resources(json.dumps({**valid,'cpu':0}), 23))
+        self.assertIn('ещё: 0', vm.format_resources(json.dumps({**valid,'cpu':80}), 23))
+        self.assertIn('укажите число', vm.format_resources(json.dumps(valid)))
+        for count in (0,-1,True,1.5,100001,'23'):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                vm.format_resources(json.dumps(valid), count)
+
     def test_script_collects_real_metrics_without_touching_processes(self):
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp)/'systemctl_called'
@@ -80,3 +92,10 @@ class ResourceEndpointTests(unittest.IsolatedAsyncioTestCase):
         request.uid=43
         with self.assertRaises(web.HTTPNotFound):await vi.status(request,auth)
         self.assertFalse(vi.ACTIVE)
+
+    async def test_rejects_invalid_count_before_connecting(self):
+        class Req:
+            async def json(self):return {'action':'resources','username':'root','password':'x','confirmed':True,'online_bots':True}
+        async def auth(req):return 42
+        with self.assertRaises(web.HTTPBadRequest):
+            await vm.start(Req(),auth)

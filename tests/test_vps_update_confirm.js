@@ -6,7 +6,8 @@ assert(start>=0 && end>start,'update confirmation is wired into the real page');
 const code=html.slice(start,end), inputs={
  'vps-user':{value:'root',checkValidity:()=>true},
  'vps-password':{value:'secret',checkValidity:()=>true},
- 'vps-confirm':{checked:true}
+ 'vps-confirm':{checked:true},
+ 'vps-online-bots':{value:'23',focus:()=>{}}
 };
 let ok=false,requests=[],prompts=0;
 const buttons=['update_bot','stop_bot','resources'].map(action=>({dataset:{vpsAction:action},disabled:false}));
@@ -22,6 +23,8 @@ vm.runInNewContext(code,context);
  await buttons[1].onclick();assert.equal(prompts,2,'non-update actions do not prompt for accounts');assert.strictEqual(requests[1].replace_accounts,false);
  context.installProbe='probe';inputs['vps-password'].value='secret';buttons.forEach(x=>x.disabled=false);
  await buttons[2].onclick();assert.equal(prompts,2,'resource check does not prompt to replace accounts');
- assert.equal(requests[2].action,'resources');assert.strictEqual(requests[2].replace_accounts,false);
+ assert.equal(requests[2].action,'resources');assert.strictEqual(requests[2].replace_accounts,false);assert.equal(requests[2].online_bots,23);
+ context.installProbe='probe';inputs['vps-password'].value='secret';inputs['vps-online-bots'].value='-2';buttons.forEach(x=>x.disabled=false);
+ await buttons[2].onclick();assert.equal(requests.length,3,'invalid online count must not start a request');
  console.log('VPS account confirmation flow OK');
 })().catch(e=>{console.error(e);process.exitCode=1});
